@@ -1,0 +1,20 @@
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Composer
+vendor/
+
+# Node modules
+node_modules/
+
+# JS build outputs (we commit them in this repo for direct use)
+# *.js
+# *.d.ts
+
+# OS files
+.DS_Store
+Thumbs.db

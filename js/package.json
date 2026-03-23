@@ -1,0 +1,28 @@
+{
+	"name": "@laker/translation-sdk",
+	"version": "1.0.0",
+	"description": "Laker Translation Service SDK for TypeScript/JavaScript",
+	"main": "translation-client.js",
+	"types": "translation-client.d.ts",
+	"files": [
+		"*.js",
+		"*.d.ts"
+	],
+	"keywords": [
+		"translation",
+		"grpc-web",
+		"laker",
+		"llm"
+	],
+	"author": "alaikis",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/alaikis/laker-translate-sdk.git",
+		"directory": "js"
+	},
+	"bugs": {
+		"url": "https://github.com/alaikis/laker-translate-sdk/issues"
+	},
+	"homepage": "https://github.com/alaikis/laker-translate-sdk#readme"
+}
