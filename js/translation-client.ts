@@ -538,7 +538,8 @@ export class TranslationClient {
 
   private getHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/grpc-web+json',
+      'X-Grpc-Web': '1'
     };
     
     if (this.token) {

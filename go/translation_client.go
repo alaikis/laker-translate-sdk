@@ -22,10 +22,10 @@ const DefaultBaseURL = "https://api.hottol.com/laker/"
 
 // TranslateRecord represents a single translation record
 type TranslateRecord struct {
-	ID         string `json:"id"`
-	Text       string `json:"text"`
-	Translate  string `json:"translate"`
-	IsCustom   bool   `json:"isCustom"`
+	ID        string `json:"id"`
+	Text      string `json:"text"`
+	Translate string `json:"translate"`
+	IsCustom  bool   `json:"isCustom"`
 }
 
 // GetSenseTranslateRequest represents a request to get translations for a sense
@@ -38,45 +38,45 @@ type GetSenseTranslateRequest struct {
 
 // GetSenseTranslateResponse represents the response for a sense translation query
 type GetSenseTranslateResponse struct {
-	SenseID     string           `json:"senseId"`
-	Total       int64            `json:"total"`
-	Page        int32            `json:"page"`
-	PageSize    int32            `json:"pageSize"`
+	SenseID      string            `json:"senseId"`
+	Total        int64             `json:"total"`
+	Page         int32             `json:"page"`
+	PageSize     int32             `json:"pageSize"`
 	Translations []TranslateRecord `json:"translations"`
 }
 
 // TranslateStreamRequest represents a streaming translation request
 type TranslateStreamRequest struct {
-	SenseID      string  `json:"senseId"`
-	Fingerprint  *string `json:"fingerprint,omitempty"`
-	BatchSize    *int32  `json:"batchSize,omitempty"`
+	SenseID     string  `json:"senseId"`
+	Fingerprint *string `json:"fingerprint,omitempty"`
+	BatchSize   *int32  `json:"batchSize,omitempty"`
 }
 
 // TranslateStreamResponse represents a streaming translation response batch
 type TranslateStreamResponse struct {
-	Batch      int32            `json:"batch"`
-	HasMore    bool             `json:"hasMore"`
-	Total      int64            `json:"total"`
+	Batch        int32             `json:"batch"`
+	HasMore      bool              `json:"hasMore"`
+	Total        int64             `json:"total"`
 	Translations []TranslateRecord `json:"translations"`
 }
 
 // LLMTranslateRequest represents a large language model translation request
 type LLMTranslateRequest struct {
-	Text      string  `json:"text"`
-	FromLang  *string `json:"fromLang,omitempty"`
-	ToLang    string  `json:"toLang"`
-	Provider  *string `json:"provider,omitempty"`
-	SenseID   *string `json:"senseId,omitempty"`
+	Text     string  `json:"text"`
+	FromLang *string `json:"fromLang,omitempty"`
+	ToLang   string  `json:"toLang"`
+	Provider *string `json:"provider,omitempty"`
+	SenseID  *string `json:"senseId,omitempty"`
 }
 
 // LLMTranslateResponse represents a large language model translation response
 type LLMTranslateResponse struct {
-	OriginalText  string `json:"originalText"`
-	TranslatedText string `json:"translatedText"`
-	Provider       string `json:"provider"`
-	Timestamp      int64  `json:"timestamp"`
-	Finished       bool   `json:"finished"`
-	Cached         bool   `json:"cached"`
+	OriginalText   string  `json:"originalText"`
+	TranslatedText string  `json:"translatedText"`
+	Provider       string  `json:"provider"`
+	Timestamp      int64   `json:"timestamp"`
+	Finished       bool    `json:"finished"`
+	Cached         bool    `json:"cached"`
 	FromLang       *string `json:"fromLang,omitempty"`
 	ToLang         *string `json:"toLang,omitempty"`
 }
@@ -91,9 +91,9 @@ type TemplateExtractResult struct {
 
 // TranslationLookupResult represents the result of a translation lookup in TranslationPool
 type TranslationLookupResult struct {
-	Found       bool              `json:"found"`
-	Translation string            `json:"translation"`
-	Source      *string           `json:"source"` // "special" or "common" or null
+	Found       bool    `json:"found"`
+	Translation string  `json:"translation"`
+	Source      *string `json:"source"` // "special" or "common" or null
 }
 
 // TranslationPool implements two-level translation cache with priority lookup
@@ -289,7 +289,7 @@ func (p *TranslationPool) RequestTranslation(
 		Text:     text,
 		FromLang: &fromLang,
 		ToLang:   toLang,
-		SenseID:   &p.senseID,
+		SenseID:  &p.senseID,
 	})
 	if err != nil {
 		return nil, err
@@ -341,7 +341,7 @@ func (p *TranslationPool) ClearAll() {
 // Client is the gRPC-Web compatible client for TranslationService
 type Client struct {
 	baseURL string
-	token  string
+	token   string
 	timeout time.Duration
 }
 
@@ -423,7 +423,8 @@ func (c *Client) doRequest(ctx context.Context, url string, body any, result any
 		return err
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/grpc-web+json")
+	req.Header.Set("X-Grpc-Web", "1")
 	if c.token != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
 	}
