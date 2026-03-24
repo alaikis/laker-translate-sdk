@@ -97,14 +97,21 @@ export interface TranslationServiceOptions {
  * TranslationService - Main entry point for translation operations
  * Provides a clean API with automatic caching and cross-tab synchronization
  *
- * Two main usage modes:
- * 1. Direct translation mode: Each request goes directly to backend (simple, no caching)
- * 2. Cached translation mode: Uses two-level cache with automatic loading from backend (recommended for most use cases)
+ * Features:
+ * - Lazy initialization: automatically initializes on first translate() call
+ * - Two-level cache: common translations + fingerprint-specific translations
+ * - Cross-tab sync: optional Broadcast Channel + localStorage synchronization
+ *
+ * Usage:
+ * - Simple: Just create and call translate() - initialization is automatic
+ * - Advanced: Call initialize() explicitly to preload all translations upfront
  */
 export declare class TranslationService {
     private client;
     private pool;
     private initialized;
+    private initPromise;
+    private options;
     /**
      * Create a new TranslationService instance
      * @param client TranslationClient instance (or base URL string to create one automatically)
@@ -112,9 +119,21 @@ export declare class TranslationService {
      */
     constructor(client: TranslationClient | string, options: TranslationServiceOptions);
     /**
+     * Ensure the service is initialized (lazy initialization)
+     * Called automatically by translate() if needed
+     */
+    private ensureInitialized;
+    /**
+     * Actual initialization logic
+     */
+    private doInitialize;
+    /**
      * Initialize the translation service - loads all common translations from backend
-     * Must be called before using cached translation operations
-     * Automatically handles cross-tab synchronization if enabled
+     *
+     * This is optional - translate() will automatically initialize if needed.
+     * Call this explicitly if you want to preload all translations upfront.
+     *
+     * Automatically handles cross-tab synchronization if enabled.
      */
     initialize(): Promise<void>;
     /**
@@ -140,15 +159,19 @@ export declare class TranslationService {
      */
     addCustomTranslation(text: string, translation: string): boolean;
     /**
-     * Lookup translation in cache (cached mode only)
+     * Lookup translation in cache
+     * Note: If not initialized, will return not found
      * @param text - Text to lookup
      * @returns Lookup result with found flag and translation if available
      */
     lookup(text: string): TranslationLookupResult;
     /**
-     * Translate text with caching (uses cached mode)
-     * 1. First checks cache according to priority rules
-     * 2. If not found in cache, requests from backend and caches result automatically
+     * Translate text with automatic caching
+     *
+     * Features:
+     * - Lazy initialization: automatically initializes on first call
+     * - Checks cache first according to priority rules (fingerprint → common)
+     * - If not found in cache, requests from backend and caches result
      *
      * @param text - Text to translate
      * @param toLang - Target language (2-letter code)
@@ -191,26 +214,86 @@ export declare class TranslationService {
     destroy(): void;
 }
 /**
+ * Cross-tab cache synchronization options for TranslationClient
+ */
+export interface ClientCrossTabOptions {
+    enabled: boolean;
+    channelName?: string;
+    storageKey?: string;
+}
+/**
  * TranslationClient - Low-level gRPC-Web compatible client for TranslationService
  * Uses JSON over HTTP transport for compatibility
- * Most users should prefer TranslationService which provides automatic caching
+ * Includes LRU cache with optional Broadcast Channel + localStorage synchronization
  */
 export declare class TranslationClient {
     private baseUrl;
     private token;
     private timeout;
+    private cache;
+    private cacheEnabled;
+    private crossTabOptions;
+    private broadcastChannel;
+    private storageKey;
     /**
      * Create a new TranslationClient
      * @param baseUrl Base URL of the gRPC-Web endpoint, defaults to https://api.hottol.com/laker/
      * @param token JWT authentication token (optional)
      * @param timeout Request timeout in milliseconds (default: 30000)
+     * @param cacheSize LRU cache size (default: 1000, set to 0 to disable cache)
+     * @param crossTabOptions Cross-tab synchronization options (default: disabled)
      */
-    constructor(baseUrl?: string, token?: string, timeout?: number);
+    constructor(baseUrl?: string, token?: string, timeout?: number, cacheSize?: number, crossTabOptions?: Partial<ClientCrossTabOptions>);
+    /**
+     * Initialize cross-tab synchronization via Broadcast Channel
+     */
+    private initCrossTabSync;
+    /**
+     * Load cache from localStorage
+     */
+    private loadFromStorage;
+    /**
+     * Save cache to localStorage
+     */
+    private saveToStorage;
+    /**
+     * Get all cache entries for storage/broadcast
+     */
+    private getAllCacheEntries;
+    /**
+     * Broadcast full cache to other tabs
+     */
+    private broadcastFullCache;
+    /**
+     * Broadcast a single cache update to other tabs
+     */
+    private broadcastCacheUpdate;
     /**
      * Set or update the JWT authentication token
      * @param token JWT token
      */
     setToken(token: string): void;
+    /**
+     * Enable or disable cache
+     * @param enabled Whether to enable cache
+     */
+    setCacheEnabled(enabled: boolean): void;
+    /**
+     * Clear the translation cache (also clears localStorage and broadcasts to other tabs)
+     */
+    clearCache(): void;
+    /**
+     * Get current cache size
+     */
+    getCacheSize(): number;
+    /**
+     * Check if cross-tab synchronization is enabled
+     */
+    isCrossTabEnabled(): boolean;
+    /**
+     * Destroy the client, close broadcast channel and free resources
+     */
+    destroy(): void;
     /**
      * GetSenseTranslate - One-shot unary request with pagination
      * @param request Request parameters
@@ -229,11 +312,15 @@ export declare class TranslationClient {
     translateStreamCollect(request: TranslateStreamRequest): Promise<TranslateStreamResponse[]>;
     /**
      * LLMTranslate - One-shot large language model translation
+     * Uses LRU cache to avoid repeated requests for the same text
+     * With cross-tab enabled, automatically syncs cache across browser tabs
      * @param request Translation request
+     * @param skipCache If true, bypass cache and always request from backend
      */
-    llmTranslate(request: LLMTranslateRequest): Promise<LLMTranslateResponse>;
+    llmTranslate(request: LLMTranslateRequest, skipCache?: boolean): Promise<LLMTranslateResponse>;
     /**
      * LLMTranslateStream - Streaming large language model translation
+     * Note: Streaming requests are not cached
      * @param request Translation request
      * @param onResponse Callback for each response chunk
      */

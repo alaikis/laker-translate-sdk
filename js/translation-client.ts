@@ -641,14 +641,21 @@ class TranslationPool {
  * TranslationService - Main entry point for translation operations
  * Provides a clean API with automatic caching and cross-tab synchronization
  * 
- * Two main usage modes:
- * 1. Direct translation mode: Each request goes directly to backend (simple, no caching)
- * 2. Cached translation mode: Uses two-level cache with automatic loading from backend (recommended for most use cases)
+ * Features:
+ * - Lazy initialization: automatically initializes on first translate() call
+ * - Two-level cache: common translations + fingerprint-specific translations
+ * - Cross-tab sync: optional Broadcast Channel + localStorage synchronization
+ * 
+ * Usage:
+ * - Simple: Just create and call translate() - initialization is automatic
+ * - Advanced: Call initialize() explicitly to preload all translations upfront
  */
 export class TranslationService {
   private client: TranslationClient;
   private pool: TranslationPool;
   private initialized: boolean = false;
+  private initPromise: Promise<void> | null = null;
+  private options: TranslationServiceOptions;
 
   /**
    * Create a new TranslationService instance
@@ -661,6 +668,8 @@ export class TranslationService {
     } else {
       this.client = client;
     }
+
+    this.options = options;
 
     // Configure cross-tab options
     const crossTabOptions: Partial<CrossTabOptions> = {
@@ -675,25 +684,50 @@ export class TranslationService {
 
     // Create internal translation pool
     this.pool = new TranslationPool(this.client, options.senseId, crossTabOptions);
-    
-    // If fingerprint provided, switch to it automatically
-    if (options.fingerprint) {
-      this.pool.switchFingerprint(options.fingerprint).catch(e => {
-        console.warn('Failed to switch to initial fingerprint:', e);
-      });
+  }
+
+  /**
+   * Ensure the service is initialized (lazy initialization)
+   * Called automatically by translate() if needed
+   */
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) {
+      return;
     }
+
+    // Use singleton pattern for initialization promise
+    if (!this.initPromise) {
+      this.initPromise = this.doInitialize();
+    }
+
+    await this.initPromise;
+  }
+
+  /**
+   * Actual initialization logic
+   */
+  private async doInitialize(): Promise<void> {
+    // Initialize the pool (loads common translations)
+    await this.pool.initialize();
+    
+    // If fingerprint provided in options, switch to it
+    if (this.options.fingerprint) {
+      await this.pool.switchFingerprint(this.options.fingerprint);
+    }
+    
+    this.initialized = true;
   }
 
   /**
    * Initialize the translation service - loads all common translations from backend
-   * Must be called before using cached translation operations
-   * Automatically handles cross-tab synchronization if enabled
+   * 
+   * This is optional - translate() will automatically initialize if needed.
+   * Call this explicitly if you want to preload all translations upfront.
+   * 
+   * Automatically handles cross-tab synchronization if enabled.
    */
   async initialize(): Promise<void> {
-    if (!this.initialized) {
-      await this.pool.initialize();
-      this.initialized = true;
-    }
+    await this.ensureInitialized();
   }
 
   /**
@@ -709,6 +743,8 @@ export class TranslationService {
    * @param fingerprint - The fingerprint to switch to
    */
   async switchFingerprint(fingerprint: string): Promise<void> {
+    // Ensure initialized before switching fingerprint
+    await this.ensureInitialized();
     await this.pool.switchFingerprint(fingerprint);
   }
 
@@ -731,7 +767,8 @@ export class TranslationService {
   }
 
   /**
-   * Lookup translation in cache (cached mode only)
+   * Lookup translation in cache
+   * Note: If not initialized, will return not found
    * @param text - Text to lookup
    * @returns Lookup result with found flag and translation if available
    */
@@ -740,9 +777,12 @@ export class TranslationService {
   }
 
   /**
-   * Translate text with caching (uses cached mode)
-   * 1. First checks cache according to priority rules
-   * 2. If not found in cache, requests from backend and caches result automatically
+   * Translate text with automatic caching
+   * 
+   * Features:
+   * - Lazy initialization: automatically initializes on first call
+   * - Checks cache first according to priority rules (fingerprint → common)
+   * - If not found in cache, requests from backend and caches result
    * 
    * @param text - Text to translate
    * @param toLang - Target language (2-letter code)
@@ -756,10 +796,12 @@ export class TranslationService {
     fromLang?: string,
     provider?: string
   ): Promise<LLMTranslateResponse> {
-    // Check cache first if we're initialized
-    if (this.initialized) {
-      const lookupResult = this.lookup(text);
-      if (lookupResult.found) {
+    // Lazy initialization - ensure initialized before checking cache
+    await this.ensureInitialized();
+
+    // Check cache first
+    const lookupResult = this.lookup(text);
+    if (lookupResult.found) {
       return {
         originalText: text,
         translatedText: lookupResult.translation,
@@ -770,10 +812,9 @@ export class TranslationService {
         fromLang: fromLang,
         toLang: toLang,
       };
-      }
     }
 
-    // Not in cache or not initialized, request from backend
+    // Not in cache, request from backend
     const senseId = this.getSenseId();
     const response = await this.client.llmTranslate({
       text,
@@ -783,13 +824,11 @@ export class TranslationService {
       senseId,
     });
 
-    // Add to cache if we're initialized
-    if (this.initialized && response.translatedText) {
-      // Add to common pool automatically
-      // Users can add custom translations via addCustomTranslation
-      const commonPool = this.pool as any;
-      commonPool.commonPool?.set(text, response.translatedText);
-      (this.pool as any).broadcastUpdate?.();
+    // Add to cache automatically
+    if (response.translatedText) {
+      const poolInternal = this.pool as any;
+      poolInternal.commonPool?.set(text, response.translatedText);
+      poolInternal.broadcastUpdate?.();
     }
 
     return response;
@@ -811,7 +850,7 @@ export class TranslationService {
     fromLang?: string,
     provider?: string
   ): Promise<LLMTranslateResponse> {
-    const senseId = this.pool['senseId'] as string;
+    const senseId = this.getSenseId();
     return this.client.llmTranslate({
       text,
       toLang,
@@ -855,30 +894,285 @@ export class TranslationService {
    */
   destroy(): void {
     this.pool.destroy();
+    this.client.destroy();
     this.initialized = false;
+    this.initPromise = null;
   }
+}
+
+/**
+ * Simple LRU Cache implementation for TranslationClient
+ * Uses Map with access order for O(1) get/set operations
+ */
+class LRUCache<K, V> {
+  private capacity: number;
+  private cache: Map<K, V>;
+
+  constructor(capacity: number = 1000) {
+    this.capacity = capacity;
+    this.cache = new Map();
+  }
+
+  /**
+   * Get value from cache, moves to end (most recently used)
+   */
+  get(key: K): V | undefined {
+    if (!this.cache.has(key)) {
+      return undefined;
+    }
+    // Move to end (most recently used)
+    const value = this.cache.get(key)!;
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    return value;
+  }
+
+  /**
+   * Set value in cache, evicts oldest if over capacity
+   */
+  set(key: K, value: V): void {
+    // Delete if exists (to move to end)
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    }
+    // Evict oldest if at capacity
+    else if (this.cache.size >= this.capacity) {
+      // First key is the oldest (least recently used)
+      const oldestKey = this.cache.keys().next().value;
+      this.cache.delete(oldestKey);
+    }
+    this.cache.set(key, value);
+  }
+
+  /**
+   * Check if key exists in cache
+   */
+  has(key: K): boolean {
+    return this.cache.has(key);
+  }
+
+  /**
+   * Delete key from cache
+   */
+  delete(key: K): boolean {
+    return this.cache.delete(key);
+  }
+
+  /**
+   * Clear all entries
+   */
+  clear(): void {
+    this.cache.clear();
+  }
+
+  /**
+   * Get current cache size
+   */
+  get size(): number {
+    return this.cache.size;
+  }
+}
+
+/**
+ * Cache key generator for translation requests
+ */
+function generateCacheKey(request: LLMTranslateRequest): string {
+  const parts = [
+    request.text,
+    request.toLang || '',
+    request.fromLang || '',
+    request.senseId || '',
+    request.provider || ''
+  ];
+  return parts.join('|');
+}
+
+/**
+ * Cross-tab cache synchronization options for TranslationClient
+ */
+export interface ClientCrossTabOptions {
+  enabled: boolean;
+  channelName?: string;
+  storageKey?: string;
+}
+
+const defaultClientCrossTabOptions: ClientCrossTabOptions = {
+  enabled: false,
+  channelName: 'laker-translation-client-cache',
+  storageKey: 'laker_translation_client_cache'
+};
+
+/**
+ * Broadcast Channel message types for TranslationClient cross-tab communication
+ */
+type ClientCrossTabMessageType = 'cache_update' | 'cache_clear' | 'request_sync';
+
+interface ClientCrossTabMessage {
+  type: ClientCrossTabMessageType;
+  key?: string;
+  data?: LLMTranslateResponse;
 }
 
 /**
  * TranslationClient - Low-level gRPC-Web compatible client for TranslationService
  * Uses JSON over HTTP transport for compatibility
- * Most users should prefer TranslationService which provides automatic caching
+ * Includes LRU cache with optional Broadcast Channel + localStorage synchronization
  */
 export class TranslationClient {
   private baseUrl: string;
   private token: string;
   private timeout: number;
+  private cache: LRUCache<string, LLMTranslateResponse>;
+  private cacheEnabled: boolean;
+  private crossTabOptions: ClientCrossTabOptions;
+  private broadcastChannel: BroadcastChannel | null = null;
+  private storageKey: string;
 
   /**
    * Create a new TranslationClient
    * @param baseUrl Base URL of the gRPC-Web endpoint, defaults to https://api.hottol.com/laker/
    * @param token JWT authentication token (optional)
    * @param timeout Request timeout in milliseconds (default: 30000)
+   * @param cacheSize LRU cache size (default: 1000, set to 0 to disable cache)
+   * @param crossTabOptions Cross-tab synchronization options (default: disabled)
    */
-  constructor(baseUrl: string = 'https://api.hottol.com/laker/', token: string = '', timeout: number = 30000) {
+  constructor(
+    baseUrl: string = 'https://api.hottol.com/laker/',
+    token: string = '',
+    timeout: number = 30000,
+    cacheSize: number = 1000,
+    crossTabOptions?: Partial<ClientCrossTabOptions>
+  ) {
     this.baseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
     this.token = token;
     this.timeout = timeout;
+    this.cacheEnabled = cacheSize > 0;
+    this.cache = new LRUCache<string, LLMTranslateResponse>(cacheSize);
+    this.crossTabOptions = { ...defaultClientCrossTabOptions, ...crossTabOptions };
+    this.storageKey = this.crossTabOptions.storageKey!;
+
+    // Initialize cross-tab synchronization if enabled
+    if (this.crossTabOptions.enabled && typeof BroadcastChannel !== 'undefined') {
+      this.initCrossTabSync();
+    }
+
+    // Load from localStorage if cross-tab enabled
+    this.loadFromStorage();
+  }
+
+  /**
+   * Initialize cross-tab synchronization via Broadcast Channel
+   */
+  private initCrossTabSync(): void {
+    this.broadcastChannel = new BroadcastChannel(this.crossTabOptions.channelName!);
+
+    this.broadcastChannel.onmessage = (event: MessageEvent<ClientCrossTabMessage>) => {
+      const message = event.data;
+
+      switch (message.type) {
+        case 'cache_update':
+          if (message.key && message.data) {
+            // Update local cache from another tab's update
+            this.cache.set(message.key, message.data);
+          }
+          break;
+        case 'cache_clear':
+          this.cache.clear();
+          break;
+        case 'request_sync':
+          // Another tab is requesting our cache, send our data
+          this.broadcastFullCache();
+          break;
+      }
+    };
+
+    // Request other tabs to share their cache
+    this.broadcastChannel.postMessage({ type: 'request_sync' });
+  }
+
+  /**
+   * Load cache from localStorage
+   */
+  private loadFromStorage(): void {
+    if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
+      return;
+    }
+
+    try {
+      const stored = localStorage.getItem(this.storageKey);
+      if (stored) {
+        const data = JSON.parse(stored) as Array<{ key: string; value: LLMTranslateResponse }>;
+        data.forEach(({ key, value }) => {
+          this.cache.set(key, value);
+        });
+      }
+    } catch (e) {
+      console.warn('Failed to load translation cache from localStorage:', e);
+    }
+  }
+
+  /**
+   * Save cache to localStorage
+   */
+  private saveToStorage(): void {
+    if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
+      return;
+    }
+
+    try {
+      const data = this.getAllCacheEntries();
+      localStorage.setItem(this.storageKey, JSON.stringify(data));
+    } catch (e) {
+      console.warn('Failed to save translation cache to localStorage:', e);
+    }
+  }
+
+  /**
+   * Get all cache entries for storage/broadcast
+   */
+  private getAllCacheEntries(): Array<{ key: string; value: LLMTranslateResponse }> {
+    const result: Array<{ key: string; value: LLMTranslateResponse }> = [];
+    // Access internal cache map for iteration
+    const cacheMap = (this.cache as any).cache as Map<string, LLMTranslateResponse>;
+    cacheMap.forEach((value, key) => {
+      result.push({ key, value });
+    });
+    return result;
+  }
+
+  /**
+   * Broadcast full cache to other tabs
+   */
+  private broadcastFullCache(): void {
+    if (!this.broadcastChannel || !this.crossTabOptions.enabled) {
+      return;
+    }
+
+    const entries = this.getAllCacheEntries();
+    entries.forEach(({ key, value }) => {
+      this.broadcastChannel!.postMessage({
+        type: 'cache_update',
+        key,
+        data: value
+      });
+    });
+  }
+
+  /**
+   * Broadcast a single cache update to other tabs
+   */
+  private broadcastCacheUpdate(key: string, value: LLMTranslateResponse): void {
+    if (!this.broadcastChannel || !this.crossTabOptions.enabled) {
+      return;
+    }
+
+    this.broadcastChannel.postMessage({
+      type: 'cache_update',
+      key,
+      data: value
+    });
+
+    this.saveToStorage();
   }
 
   /**
@@ -887,6 +1181,55 @@ export class TranslationClient {
    */
   setToken(token: string): void {
     this.token = token;
+  }
+
+  /**
+   * Enable or disable cache
+   * @param enabled Whether to enable cache
+   */
+  setCacheEnabled(enabled: boolean): void {
+    this.cacheEnabled = enabled;
+  }
+
+  /**
+   * Clear the translation cache (also clears localStorage and broadcasts to other tabs)
+   */
+  clearCache(): void {
+    this.cache.clear();
+
+    // Clear localStorage
+    if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
+      localStorage.removeItem(this.storageKey);
+    }
+
+    // Broadcast clear to other tabs
+    if (this.broadcastChannel && this.crossTabOptions.enabled) {
+      this.broadcastChannel.postMessage({ type: 'cache_clear' });
+    }
+  }
+
+  /**
+   * Get current cache size
+   */
+  getCacheSize(): number {
+    return this.cache.size;
+  }
+
+  /**
+   * Check if cross-tab synchronization is enabled
+   */
+  isCrossTabEnabled(): boolean {
+    return this.crossTabOptions.enabled;
+  }
+
+  /**
+   * Destroy the client, close broadcast channel and free resources
+   */
+  destroy(): void {
+    if (this.broadcastChannel) {
+      this.broadcastChannel.close();
+      this.broadcastChannel = null;
+    }
   }
 
   /**
@@ -966,17 +1309,42 @@ export class TranslationClient {
 
   /**
    * LLMTranslate - One-shot large language model translation
+   * Uses LRU cache to avoid repeated requests for the same text
+   * With cross-tab enabled, automatically syncs cache across browser tabs
    * @param request Translation request
+   * @param skipCache If true, bypass cache and always request from backend
    */
-  async llmTranslate(request: LLMTranslateRequest): Promise<LLMTranslateResponse> {
-    const url = `${this.baseUrl}/TranslationService/LLMTranslate`;
+  async llmTranslate(request: LLMTranslateRequest, skipCache: boolean = false): Promise<LLMTranslateResponse> {
+    const cacheKey = generateCacheKey(request);
 
-    const response = await this.fetchJson(url, request);
-    return response as LLMTranslateResponse;
+    // Check cache first
+    if (this.cacheEnabled && !skipCache) {
+      const cached = this.cache.get(cacheKey);
+      if (cached) {
+        // Return cached response with cached flag set
+        return { ...cached, cached: true };
+      }
+    }
+
+    // Request from backend
+    const url = `${this.baseUrl}/TranslationService/LLMTranslate`;
+    const response = await this.fetchJson(url, request) as LLMTranslateResponse;
+
+    // Cache the response
+    if (this.cacheEnabled && response.translatedText) {
+      const cachedResponse = { ...response, cached: true };
+      this.cache.set(cacheKey, cachedResponse);
+      
+      // Broadcast to other tabs and save to localStorage
+      this.broadcastCacheUpdate(cacheKey, cachedResponse);
+    }
+
+    return { ...response, cached: false };
   }
 
   /**
    * LLMTranslateStream - Streaming large language model translation
+   * Note: Streaming requests are not cached
    * @param request Translation request
    * @param onResponse Callback for each response chunk
    */
