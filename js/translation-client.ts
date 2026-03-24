@@ -80,6 +80,38 @@ export interface TranslationLookupResult {
 }
 
 /**
+ * Broadcast Channel message types for cross-tab communication
+ */
+type CrossTabMessageType = 'cache_update' | 'cache_clear' | 'request_initial_sync';
+
+interface CrossTabMessage {
+  type: CrossTabMessageType;
+  senseId: string;
+  fingerprint?: string;
+  data?: {
+    common?: Array<{ text: string; translation: string }>;
+    special?: Array<{ text: string; translation: string }>;
+    text?: string;
+    translation?: string;
+  };
+}
+
+/**
+ * Cross-tab cache synchronization options
+ */
+export interface CrossTabOptions {
+  enabled: boolean;
+  channelName?: string;
+  storageKeyPrefix?: string;
+}
+
+const defaultCrossTabOptions: CrossTabOptions = {
+  enabled: false,
+  channelName: 'laker-translation-cache',
+  storageKeyPrefix: 'laker_translation_'
+};
+
+/**
  * Automatic template extraction from text containing numeric variables
  * @param text Original text that may contain numeric variables
  * @returns Template extraction result
@@ -116,73 +148,263 @@ export function extractTemplate(text: string): TemplateExtractResult {
 }
 
 /**
- * TranslationPool - Two-level translation cache with priority lookup
- * 
+ * Translation options
+ */
+export interface TranslationServiceOptions {
+  senseId: string;
+  fingerprint?: string;
+  crossTab?: boolean;
+  crossTabChannelName?: string;
+  crossTabStorageKeyPrefix?: string;
+}
+
+/**
+ * TranslationPool - Two-level translation cache with priority lookup (internal)
+ *
  * Architecture:
  * - commonPool: stores general/common translations (automatic from backend)
  * - fingerprintPools: stores special translations for specific fingerprint (requires manual input)
- * 
+ * - Optional cross-tab synchronization via Broadcast Channel and localStorage
+ *
  * Lookup Priority:
  * 1. Current fingerprint special translations
- * 2. Common translations  
+ * 2. Common translations
  * 3. If not found, request from backend
- * 
+ *
  * Rules:
  * - All new translations from backend are automatically added to commonPool
  * - Special translations must be added manually
+ * - With cross-tab enabled, all changes are broadcast to other tabs
  */
-export class TranslationPool {
+class TranslationPool {
   private client: TranslationClient;
   private senseId: string;
   private commonPool: Map<string, string> = new Map();
   private fingerprintPools: Map<string, Map<string, string>> = new Map();
   private currentFingerprint: string | null = null;
+  private crossTabOptions: CrossTabOptions;
+  private broadcastChannel: BroadcastChannel | null = null;
   
   /**
    * Create a new TranslationPool for a specific sense
    * @param client TranslationClient instance
    * @param senseId The semantic sense ID
+   * @param crossTabOptions Cross-tab synchronization options
    */
-  constructor(client: TranslationClient, senseId: string) {
+  constructor(client: TranslationClient, senseId: string, crossTabOptions?: Partial<CrossTabOptions>) {
     this.client = client;
     this.senseId = senseId;
+    this.crossTabOptions = { ...defaultCrossTabOptions, ...crossTabOptions };
+    
+    if (this.crossTabOptions.enabled && typeof BroadcastChannel !== 'undefined') {
+      this.initCrossTabSync();
+    }
+    
+    // Load from localStorage if cross-tab enabled and storage available
+    this.loadFromStorage();
+  }
+  
+  /**
+   * Initialize cross-tab synchronization
+   */
+  private initCrossTabSync(): void {
+    this.broadcastChannel = new BroadcastChannel(this.crossTabOptions.channelName!);
+    
+    this.broadcastChannel.onmessage = (event: MessageEvent<CrossTabMessage>) => {
+      const message = event.data;
+      
+      // Ignore messages for other senses
+      if (message.senseId !== this.senseId) {
+        return;
+      }
+      
+      switch (message.type) {
+        case 'cache_update':
+          this.handleCacheUpdate(message);
+          break;
+        case 'cache_clear':
+          this.handleCacheClear(message);
+          break;
+        case 'request_initial_sync':
+          this.handleInitialSyncRequest();
+          break;
+      }
+    };
+    
+    // Request other tabs to share their cache
+    this.broadcastChannel.postMessage({
+      type: 'request_initial_sync',
+      senseId: this.senseId
+    });
+  }
+  
+  /**
+   * Load cache from localStorage
+   */
+  private loadFromStorage(): void {
+    if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
+      return;
+    }
+    
+    const storageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_common`;
+    try {
+      const stored = localStorage.getItem(storageKey);
+      if (stored) {
+        const data = JSON.parse(stored) as Array<{ text: string; translation: string }>;
+        data.forEach(({ text, translation }) => {
+          this.commonPool.set(text, translation);
+        });
+      }
+      
+      // Load fingerprint data if we have current fingerprint
+      if (this.currentFingerprint) {
+        const fpStorageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${this.currentFingerprint}`;
+        const fpStored = localStorage.getItem(fpStorageKey);
+        if (fpStored) {
+          const data = JSON.parse(fpStored) as Array<{ text: string; translation: string }>;
+          let pool = this.fingerprintPools.get(this.currentFingerprint);
+          if (!pool) {
+            pool = new Map();
+            this.fingerprintPools.set(this.currentFingerprint, pool);
+          }
+          data.forEach(({ text, translation }) => {
+            pool!.set(text, translation);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load translation cache from localStorage:', e);
+    }
+  }
+  
+  /**
+   * Save cache to localStorage
+   */
+  private saveToStorage(): void {
+    if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
+      return;
+    }
+    
+    const storageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_common`;
+    try {
+      const data = this.getAllCommon();
+      localStorage.setItem(storageKey, JSON.stringify(data));
+      
+      // Save current fingerprint if active
+      if (this.currentFingerprint) {
+        const fpStorageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${this.currentFingerprint}`;
+        const fpData = this.getAllCurrentSpecial();
+        localStorage.setItem(fpStorageKey, JSON.stringify(fpData));
+      }
+    } catch (e) {
+      console.warn('Failed to save translation cache to localStorage:', e);
+    }
+  }
+  
+  /**
+   * Broadcast cache update to all other tabs
+   */
+  private broadcastUpdate(text?: string, translation?: string): void {
+    if (!this.broadcastChannel || !this.crossTabOptions.enabled) {
+      return;
+    }
+    
+    const message: CrossTabMessage = {
+      type: 'cache_update',
+      senseId: this.senseId,
+      fingerprint: this.currentFingerprint || undefined,
+      data: {
+        common: this.getAllCommon(),
+        ...(text && translation && { text, translation })
+      }
+    };
+    
+    this.broadcastChannel.postMessage(message);
+    this.saveToStorage();
+  }
+  
+  /**
+   * Handle incoming cache update from another tab
+   */
+  private handleCacheUpdate(message: CrossTabMessage): void {
+    if (message.data?.common) {
+      // Update full common cache
+      this.commonPool.clear();
+      message.data.common.forEach(({ text, translation }) => {
+        this.commonPool.set(text, translation);
+      });
+    }
+    
+    // Update specific entry
+    if (message.data?.text && message.data?.translation && message.fingerprint) {
+      let pool = this.fingerprintPools.get(message.fingerprint);
+      if (!pool) {
+        pool = new Map();
+        this.fingerprintPools.set(message.fingerprint, pool);
+      }
+      pool.set(message.data.text, message.data.translation);
+      this.saveToStorage();
+    }
+  }
+  
+  /**
+   * Handle incoming cache clear from another tab
+   */
+  private handleCacheClear(message: CrossTabMessage): void {
+    this.clearAll();
+  }
+  
+  /**
+   * Handle initial sync request from a new tab
+   */
+  private handleInitialSyncRequest(): void {
+    // Send our current cache to the new tab
+    this.broadcastUpdate();
   }
   
   /**
    * Initialize the pool - loads all common translations from backend
+   * If cross-tab is enabled and cache exists in localStorage, uses that first
    */
   async initialize(): Promise<void> {
-    let page = 1;
-    const pageSize = 5000;
-    
-    // Stream all common translations
-    const response = await this.client.getSenseTranslate({
-      senseId: this.senseId,
-      page,
-      pageSize
-    });
-    
-    // Add all common translations to pool
-    response.translations.forEach(record => {
-      if (record.isCustom) {
-        // Custom translations go to common
-        this.commonPool.set(record.text, record.translate);
-      }
-    });
-    
-    // If there are more pages, continue loading
-    while (response.page * response.pageSize < response.total) {
-      page++;
-      const nextResponse = await this.client.getSenseTranslate({
+    // If cross-tab enabled and we already have data from localStorage/storage,
+    // we still sync with backend to get latest updates
+    if (this.commonPool.size === 0) {
+      let page = 1;
+      const pageSize = 5000;
+      
+      // Stream all common translations
+      const response = await this.client.getSenseTranslate({
         senseId: this.senseId,
         page,
         pageSize
       });
-      nextResponse.translations.forEach(record => {
+      
+      // Add all common translations to pool
+      response.translations.forEach(record => {
         if (record.isCustom) {
+          // Custom translations go to common
           this.commonPool.set(record.text, record.translate);
         }
       });
+      
+      // If there are more pages, continue loading
+      while (response.page * response.pageSize < response.total) {
+        page++;
+        const nextResponse = await this.client.getSenseTranslate({
+          senseId: this.senseId,
+          page,
+          pageSize
+        });
+        nextResponse.translations.forEach(record => {
+          if (record.isCustom) {
+            this.commonPool.set(record.text, record.translate);
+          }
+        });
+      }
+      
+      // Broadcast to other tabs after full initialization
+      this.broadcastUpdate();
     }
   }
   
@@ -285,7 +507,7 @@ export class TranslationPool {
   /**
    * Add a special translation to the current fingerprint
    * Requires that a fingerprint is currently active
-   * 
+   *
    * @param text Original text
    * @param translation Translated text
    * @returns true if added successfully, false if no current fingerprint
@@ -301,12 +523,16 @@ export class TranslationPool {
     }
     
     specialPool.set(text, translation);
+    
+    // Broadcast to other tabs
+    this.broadcastUpdate(text, translation);
+    
     return true;
   }
   
   /**
    * Request translation from backend, automatically adds to common pool if found
-   * 
+   *
    * @param text Text to translate
    * @param fromLang Source language
    * @param toLang Target language
@@ -327,6 +553,8 @@ export class TranslationPool {
     // Add to common pool automatically
     if (response.translatedText) {
       this.commonPool.set(text, response.translatedText);
+      // Broadcast to other tabs
+      this.broadcastUpdate();
     }
     
     return response;
@@ -370,12 +598,271 @@ export class TranslationPool {
     this.commonPool.clear();
     this.fingerprintPools.clear();
     this.currentFingerprint = null;
+    
+    // Clear localStorage
+    if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
+      const storageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_common`;
+      localStorage.removeItem(storageKey);
+      if (this.currentFingerprint) {
+        const fpStorageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${this.currentFingerprint}`;
+        localStorage.removeItem(fpStorageKey);
+      }
+    }
+    
+    // Broadcast clear to other tabs
+    if (this.broadcastChannel && this.crossTabOptions.enabled) {
+      this.broadcastChannel.postMessage({
+        type: 'cache_clear',
+        senseId: this.senseId
+      });
+    }
+  }
+  
+  /**
+   * Close the broadcast channel to free resources
+   * Should be called when the pool is no longer needed
+   */
+  destroy(): void {
+    if (this.broadcastChannel) {
+      this.broadcastChannel.close();
+      this.broadcastChannel = null;
+    }
+  }
+  
+  /**
+   * Check if cross-tab synchronization is enabled
+   */
+  isCrossTabEnabled(): boolean {
+    return this.crossTabOptions.enabled;
   }
 }
 
 /**
- * TranslationClient - gRPC-Web compatible client for TranslationService
+ * TranslationService - Main entry point for translation operations
+ * Provides a clean API with automatic caching and cross-tab synchronization
+ * 
+ * Two main usage modes:
+ * 1. Direct translation mode: Each request goes directly to backend (simple, no caching)
+ * 2. Cached translation mode: Uses two-level cache with automatic loading from backend (recommended for most use cases)
+ */
+export class TranslationService {
+  private client: TranslationClient;
+  private pool: TranslationPool;
+  private initialized: boolean = false;
+
+  /**
+   * Create a new TranslationService instance
+   * @param client TranslationClient instance (or base URL string to create one automatically)
+   * @param options Translation service options including senseId and optional fingerprint/cross-tab settings
+   */
+  constructor(client: TranslationClient | string, options: TranslationServiceOptions) {
+    if (typeof client === 'string') {
+      this.client = new TranslationClient(client);
+    } else {
+      this.client = client;
+    }
+
+    // Configure cross-tab options
+    const crossTabOptions: Partial<CrossTabOptions> = {
+      enabled: options.crossTab === true,
+    };
+    if (options.crossTabChannelName) {
+      crossTabOptions.channelName = options.crossTabChannelName;
+    }
+    if (options.crossTabStorageKeyPrefix) {
+      crossTabOptions.storageKeyPrefix = options.crossTabStorageKeyPrefix;
+    }
+
+    // Create internal translation pool
+    this.pool = new TranslationPool(this.client, options.senseId, crossTabOptions);
+    
+    // If fingerprint provided, switch to it automatically
+    if (options.fingerprint) {
+      this.pool.switchFingerprint(options.fingerprint).catch(e => {
+        console.warn('Failed to switch to initial fingerprint:', e);
+      });
+    }
+  }
+
+  /**
+   * Initialize the translation service - loads all common translations from backend
+   * Must be called before using cached translation operations
+   * Automatically handles cross-tab synchronization if enabled
+   */
+  async initialize(): Promise<void> {
+    if (!this.initialized) {
+      await this.pool.initialize();
+      this.initialized = true;
+    }
+  }
+
+  /**
+   * Check if service has been initialized
+   */
+  isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  /**
+   * Switch to a different fingerprint (for personalized/custom translations)
+   * Automatically loads all special translations for this fingerprint
+   * @param fingerprint - The fingerprint to switch to
+   */
+  async switchFingerprint(fingerprint: string): Promise<void> {
+    await this.pool.switchFingerprint(fingerprint);
+  }
+
+  /**
+   * Clear the current fingerprint - frees memory
+   */
+  clearCurrentFingerprint(): void {
+    this.pool.clearCurrentFingerprint();
+  }
+
+  /**
+   * Add a custom/special translation to the current fingerprint
+   * Requires that a fingerprint is active
+   * @param text - Original text
+   * @param translation - Translated text
+   * @returns true if added successfully, false if no current fingerprint
+   */
+  addCustomTranslation(text: string, translation: string): boolean {
+    return this.pool.addSpecialTranslation(text, translation);
+  }
+
+  /**
+   * Lookup translation in cache (cached mode only)
+   * @param text - Text to lookup
+   * @returns Lookup result with found flag and translation if available
+   */
+  lookup(text: string): TranslationLookupResult {
+    return this.pool.lookup(text);
+  }
+
+  /**
+   * Translate text with caching (uses cached mode)
+   * 1. First checks cache according to priority rules
+   * 2. If not found in cache, requests from backend and caches result automatically
+   * 
+   * @param text - Text to translate
+   * @param toLang - Target language (2-letter code)
+   * @param fromLang - Optional source language (2-letter code)
+   * @param provider - Optional translation provider name
+   * @returns Translation response
+   */
+  async translate(
+    text: string,
+    toLang: string,
+    fromLang?: string,
+    provider?: string
+  ): Promise<LLMTranslateResponse> {
+    // Check cache first if we're initialized
+    if (this.initialized) {
+      const lookupResult = this.lookup(text);
+      if (lookupResult.found) {
+      return {
+        originalText: text,
+        translatedText: lookupResult.translation,
+        provider: 'cache',
+        timestamp: Date.now(),
+        finished: true,
+        cached: true,
+        fromLang: fromLang,
+        toLang: toLang,
+      };
+      }
+    }
+
+    // Not in cache or not initialized, request from backend
+    const senseId = this.getSenseId();
+    const response = await this.client.llmTranslate({
+      text,
+      toLang,
+      fromLang,
+      provider,
+      senseId,
+    });
+
+    // Add to cache if we're initialized
+    if (this.initialized && response.translatedText) {
+      // Add to common pool automatically
+      // Users can add custom translations via addCustomTranslation
+      const commonPool = this.pool as any;
+      commonPool.commonPool?.set(text, response.translatedText);
+      (this.pool as any).broadcastUpdate?.();
+    }
+
+    return response;
+  }
+
+  /**
+   * Direct translation - bypasses cache and always requests from backend
+   * Use this for one-off translations when you don't need caching
+   * 
+   * @param text - Text to translate
+   * @param toLang - Target language (2-letter code)
+   * @param fromLang - Optional source language (2-letter code)
+   * @param provider - Optional translation provider name
+   * @returns Translation response
+   */
+  async translateDirect(
+    text: string,
+    toLang: string,
+    fromLang?: string,
+    provider?: string
+  ): Promise<LLMTranslateResponse> {
+    const senseId = this.pool['senseId'] as string;
+    return this.client.llmTranslate({
+      text,
+      toLang,
+      fromLang,
+      provider,
+      senseId,
+    });
+  }
+
+  /**
+   * Stream translations from backend in batches
+   * Used for bulk loading all translations in a sense
+   * 
+   * @param request - Stream request parameters
+   * @param onBatch - Callback for each batch received
+   */
+  async streamTranslate(
+    request: TranslateStreamRequest,
+    onBatch: (response: TranslateStreamResponse) => boolean | void
+  ): Promise<void> {
+    await this.client.translateStream(request, onBatch);
+  }
+
+  /**
+   * Get the sense ID this service is connected to
+   */
+  getSenseId(): string {
+    return (this.pool as any).senseId;
+  }
+
+  /**
+   * Clear all cached data to free memory
+   */
+  clearAll(): void {
+    this.pool.clearAll();
+  }
+
+  /**
+   * Destroy the service, close connections and free resources
+   * Should be called when the service is no longer needed
+   */
+  destroy(): void {
+    this.pool.destroy();
+    this.initialized = false;
+  }
+}
+
+/**
+ * TranslationClient - Low-level gRPC-Web compatible client for TranslationService
  * Uses JSON over HTTP transport for compatibility
+ * Most users should prefer TranslationService which provides automatic caching
  */
 export class TranslationClient {
   private baseUrl: string;

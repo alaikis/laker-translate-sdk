@@ -70,104 +70,130 @@ export interface TranslationLookupResult {
     source: 'special' | 'common' | null;
 }
 /**
+ * Cross-tab cache synchronization options
+ */
+export interface CrossTabOptions {
+    enabled: boolean;
+    channelName?: string;
+    storageKeyPrefix?: string;
+}
+/**
  * Automatic template extraction from text containing numeric variables
  * @param text Original text that may contain numeric variables
  * @returns Template extraction result
  */
 export declare function extractTemplate(text: string): TemplateExtractResult;
 /**
- * TranslationPool - Two-level translation cache with priority lookup
- *
- * Architecture:
- * - commonPool: stores general/common translations (automatic from backend)
- * - fingerprintPools: stores special translations for specific fingerprint (requires manual input)
- *
- * Lookup Priority:
- * 1. Current fingerprint special translations
- * 2. Common translations
- * 3. If not found, request from backend
- *
- * Rules:
- * - All new translations from backend are automatically added to commonPool
- * - Special translations must be added manually
+ * Translation options
  */
-export declare class TranslationPool {
+export interface TranslationServiceOptions {
+    senseId: string;
+    fingerprint?: string;
+    crossTab?: boolean;
+    crossTabChannelName?: string;
+    crossTabStorageKeyPrefix?: string;
+}
+/**
+ * TranslationService - Main entry point for translation operations
+ * Provides a clean API with automatic caching and cross-tab synchronization
+ *
+ * Two main usage modes:
+ * 1. Direct translation mode: Each request goes directly to backend (simple, no caching)
+ * 2. Cached translation mode: Uses two-level cache with automatic loading from backend (recommended for most use cases)
+ */
+export declare class TranslationService {
     private client;
-    private senseId;
-    private commonPool;
-    private fingerprintPools;
-    private currentFingerprint;
+    private pool;
+    private initialized;
     /**
-     * Create a new TranslationPool for a specific sense
-     * @param client TranslationClient instance
-     * @param senseId The semantic sense ID
+     * Create a new TranslationService instance
+     * @param client TranslationClient instance (or base URL string to create one automatically)
+     * @param options Translation service options including senseId and optional fingerprint/cross-tab settings
      */
-    constructor(client: TranslationClient, senseId: string);
+    constructor(client: TranslationClient | string, options: TranslationServiceOptions);
     /**
-     * Initialize the pool - loads all common translations from backend
+     * Initialize the translation service - loads all common translations from backend
+     * Must be called before using cached translation operations
+     * Automatically handles cross-tab synchronization if enabled
      */
     initialize(): Promise<void>;
     /**
-     * Switch to a different fingerprint, loads its special translations
-     * @param fingerprint The fingerprint to switch to
+     * Check if service has been initialized
+     */
+    isInitialized(): boolean;
+    /**
+     * Switch to a different fingerprint (for personalized/custom translations)
+     * Automatically loads all special translations for this fingerprint
+     * @param fingerprint - The fingerprint to switch to
      */
     switchFingerprint(fingerprint: string): Promise<void>;
     /**
-     * Clear the current fingerprint to free memory
+     * Clear the current fingerprint - frees memory
      */
     clearCurrentFingerprint(): void;
     /**
-     * Lookup translation following priority rules:
-     * 1. Current fingerprint special translation
-     * 2. Common translation
-     * 3. Not found
-     *
-     * @param text Original text to lookup
-     * @returns Lookup result
+     * Add a custom/special translation to the current fingerprint
+     * Requires that a fingerprint is active
+     * @param text - Original text
+     * @param translation - Translated text
+     * @returns true if added successfully, false if no current fingerprint
+     */
+    addCustomTranslation(text: string, translation: string): boolean;
+    /**
+     * Lookup translation in cache (cached mode only)
+     * @param text - Text to lookup
+     * @returns Lookup result with found flag and translation if available
      */
     lookup(text: string): TranslationLookupResult;
     /**
-     * Add a special translation to the current fingerprint
-     * Requires that a fingerprint is currently active
+     * Translate text with caching (uses cached mode)
+     * 1. First checks cache according to priority rules
+     * 2. If not found in cache, requests from backend and caches result automatically
      *
-     * @param text Original text
-     * @param translation Translated text
-     * @returns true if added successfully, false if no current fingerprint
-     */
-    addSpecialTranslation(text: string, translation: string): boolean;
-    /**
-     * Request translation from backend, automatically adds to common pool if found
-     *
-     * @param text Text to translate
-     * @param fromLang Source language
-     * @param toLang Target language
+     * @param text - Text to translate
+     * @param toLang - Target language (2-letter code)
+     * @param fromLang - Optional source language (2-letter code)
+     * @param provider - Optional translation provider name
      * @returns Translation response
      */
-    requestTranslation(text: string, fromLang: string, toLang: string): Promise<LLMTranslateResponse>;
+    translate(text: string, toLang: string, fromLang?: string, provider?: string): Promise<LLMTranslateResponse>;
     /**
-     * Get all common translations
-     * @returns Array of {text, translation}
+     * Direct translation - bypasses cache and always requests from backend
+     * Use this for one-off translations when you don't need caching
+     *
+     * @param text - Text to translate
+     * @param toLang - Target language (2-letter code)
+     * @param fromLang - Optional source language (2-letter code)
+     * @param provider - Optional translation provider name
+     * @returns Translation response
      */
-    getAllCommon(): Array<{
-        text: string;
-        translation: string;
-    }>;
+    translateDirect(text: string, toLang: string, fromLang?: string, provider?: string): Promise<LLMTranslateResponse>;
     /**
-     * Get all special translations for current fingerprint
-     * @returns Array of {text, translation} or empty if no current fingerprint
+     * Stream translations from backend in batches
+     * Used for bulk loading all translations in a sense
+     *
+     * @param request - Stream request parameters
+     * @param onBatch - Callback for each batch received
      */
-    getAllCurrentSpecial(): Array<{
-        text: string;
-        translation: string;
-    }>;
+    streamTranslate(request: TranslateStreamRequest, onBatch: (response: TranslateStreamResponse) => boolean | void): Promise<void>;
+    /**
+     * Get the sense ID this service is connected to
+     */
+    getSenseId(): string;
     /**
      * Clear all cached data to free memory
      */
     clearAll(): void;
+    /**
+     * Destroy the service, close connections and free resources
+     * Should be called when the service is no longer needed
+     */
+    destroy(): void;
 }
 /**
- * TranslationClient - gRPC-Web compatible client for TranslationService
+ * TranslationClient - Low-level gRPC-Web compatible client for TranslationService
  * Uses JSON over HTTP transport for compatibility
+ * Most users should prefer TranslationService which provides automatic caching
  */
 export declare class TranslationClient {
     private baseUrl;
