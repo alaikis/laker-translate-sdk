@@ -42,24 +42,27 @@ export function extractTemplate(text) {
     };
 }
 /**
- * TranslationPool - Two-level translation cache with priority lookup (internal)
+ * TranslationPool - Single-level translation cache (simplified for new API)
  *
  * Architecture:
- * - commonPool: stores general/common translations (automatic from backend)
- * - fingerprintPools: stores special translations for specific fingerprint (requires manual input)
+ * - pool: stores translations (from backend, unified result field)
+ * - currentFingerprint: current active fingerprint for special translations
  * - Optional cross-tab synchronization via Broadcast Channel and localStorage
  *
- * Lookup Priority:
- * 1. Current fingerprint special translations
- * 2. Common translations
- * 3. If not found, request from backend
- *
  * Rules:
- * - All new translations from backend are automatically added to commonPool
- * - Special translations must be added manually
- * - With cross-tab enabled, all changes are broadcast to other tabs
+ * - If fingerprint exists, load special translations
+ * - If no fingerprint, load common translations
+ * - All translations stored in single pool with unified access
  */
 class TranslationPool {
+    client;
+    senseId;
+    pool = new Map();
+    currentFingerprint = null;
+    crossTabOptions;
+    broadcastChannel = null;
+    loading = false;
+    loadedFingerprints = new Set();
     /**
      * Create a new TranslationPool for a specific sense
      * @param client TranslationClient instance
@@ -67,10 +70,6 @@ class TranslationPool {
      * @param crossTabOptions Cross-tab synchronization options
      */
     constructor(client, senseId, crossTabOptions) {
-        this.commonPool = new Map();
-        this.fingerprintPools = new Map();
-        this.currentFingerprint = null;
-        this.broadcastChannel = null;
         this.client = client;
         this.senseId = senseId;
         this.crossTabOptions = { ...defaultCrossTabOptions, ...crossTabOptions };
@@ -116,35 +115,26 @@ class TranslationPool {
         if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
             return;
         }
-        const storageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_common`;
+        const storageKey = this.getStorageKey();
         try {
             const stored = localStorage.getItem(storageKey);
             if (stored) {
                 const data = JSON.parse(stored);
                 data.forEach(({ text, translation }) => {
-                    this.commonPool.set(text, translation);
+                    this.pool.set(text, translation);
                 });
-            }
-            // Load fingerprint data if we have current fingerprint
-            if (this.currentFingerprint) {
-                const fpStorageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${this.currentFingerprint}`;
-                const fpStored = localStorage.getItem(fpStorageKey);
-                if (fpStored) {
-                    const data = JSON.parse(fpStored);
-                    let pool = this.fingerprintPools.get(this.currentFingerprint);
-                    if (!pool) {
-                        pool = new Map();
-                        this.fingerprintPools.set(this.currentFingerprint, pool);
-                    }
-                    data.forEach(({ text, translation }) => {
-                        pool.set(text, translation);
-                    });
-                }
             }
         }
         catch (e) {
             console.warn('Failed to load translation cache from localStorage:', e);
         }
+    }
+    /**
+     * Get storage key based on current fingerprint
+     */
+    getStorageKey() {
+        const fp = this.currentFingerprint || 'common';
+        return `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${fp}`;
     }
     /**
      * Save cache to localStorage
@@ -153,16 +143,10 @@ class TranslationPool {
         if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
             return;
         }
-        const storageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_common`;
+        const storageKey = this.getStorageKey();
         try {
-            const data = this.getAllCommon();
+            const data = this.getAll();
             localStorage.setItem(storageKey, JSON.stringify(data));
-            // Save current fingerprint if active
-            if (this.currentFingerprint) {
-                const fpStorageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${this.currentFingerprint}`;
-                const fpData = this.getAllCurrentSpecial();
-                localStorage.setItem(fpStorageKey, JSON.stringify(fpData));
-            }
         }
         catch (e) {
             console.warn('Failed to save translation cache to localStorage:', e);
@@ -180,7 +164,7 @@ class TranslationPool {
             senseId: this.senseId,
             fingerprint: this.currentFingerprint || undefined,
             data: {
-                common: this.getAllCommon(),
+                result: this.getAll(),
                 ...(text && translation && { text, translation })
             }
         };
@@ -191,21 +175,16 @@ class TranslationPool {
      * Handle incoming cache update from another tab
      */
     handleCacheUpdate(message) {
-        if (message.data?.common) {
-            // Update full common cache
-            this.commonPool.clear();
-            message.data.common.forEach(({ text, translation }) => {
-                this.commonPool.set(text, translation);
+        if (message.data?.result) {
+            // Update full cache
+            this.pool.clear();
+            message.data.result.forEach(({ text, translation }) => {
+                this.pool.set(text, translation);
             });
         }
         // Update specific entry
-        if (message.data?.text && message.data?.translation && message.fingerprint) {
-            let pool = this.fingerprintPools.get(message.fingerprint);
-            if (!pool) {
-                pool = new Map();
-                this.fingerprintPools.set(message.fingerprint, pool);
-            }
-            pool.set(message.data.text, message.data.translation);
+        if (message.data?.text && message.data?.translation) {
+            this.pool.set(message.data.text, message.data.translation);
             this.saveToStorage();
         }
     }
@@ -223,122 +202,80 @@ class TranslationPool {
         this.broadcastUpdate();
     }
     /**
-     * Initialize the pool - loads all common translations from backend
-     * If cross-tab is enabled and cache exists in localStorage, uses that first
+     * Check if currently loading
+     */
+    isLoading() {
+        return this.loading;
+    }
+    /**
+     * Initialize the pool - loads translations from backend using streaming
+     * If fingerprint is set, loads special translations; otherwise loads common
      */
     async initialize() {
-        // If cross-tab enabled and we already have data from localStorage/storage,
-        // we still sync with backend to get latest updates
-        if (this.commonPool.size === 0) {
-            let page = 1;
-            const pageSize = 5000;
-            // Stream all common translations
-            const response = await this.client.getSenseTranslate({
+        if (this.loading) {
+            return;
+        }
+        // Check if already loaded for this fingerprint
+        const fpKey = this.currentFingerprint || 'common';
+        if (this.loadedFingerprints.has(fpKey) && this.pool.size > 0) {
+            return;
+        }
+        this.loading = true;
+        try {
+            // Use streaming for batch loading
+            await this.client.translateStream({
                 senseId: this.senseId,
-                page,
-                pageSize
-            });
-            // Add all common translations to pool
-            response.translations.forEach(record => {
-                if (record.isCustom) {
-                    // Custom translations go to common
-                    this.commonPool.set(record.text, record.translate);
-                }
-            });
-            // If there are more pages, continue loading
-            while (response.page * response.pageSize < response.total) {
-                page++;
-                const nextResponse = await this.client.getSenseTranslate({
-                    senseId: this.senseId,
-                    page,
-                    pageSize
+                fingerprint: this.currentFingerprint || undefined,
+                batchSize: 500
+            }, (response) => {
+                // Add all translations from this batch
+                response.translations.forEach(record => {
+                    this.pool.set(record.text, record.translate);
                 });
-                nextResponse.translations.forEach(record => {
-                    if (record.isCustom) {
-                        this.commonPool.set(record.text, record.translate);
-                    }
-                });
-            }
+                return true; // Continue streaming
+            });
+            // Mark as loaded
+            this.loadedFingerprints.add(fpKey);
             // Broadcast to other tabs after full initialization
             this.broadcastUpdate();
         }
+        finally {
+            this.loading = false;
+        }
     }
     /**
-     * Switch to a different fingerprint, loads its special translations
+     * Switch to a different fingerprint, loads its translations
      * @param fingerprint The fingerprint to switch to
      */
     async switchFingerprint(fingerprint) {
-        // Clear current fingerprint to free memory
-        this.currentFingerprint = null;
-        // Check if we already have this fingerprint cached
-        if (!this.fingerprintPools.has(fingerprint)) {
-            this.fingerprintPools.set(fingerprint, new Map());
-            // Load special translations for this fingerprint
-            let page = 1;
-            const pageSize = 1000;
-            const response = await this.client.getSenseTranslate({
-                senseId: this.senseId,
-                fingerprint,
-                page,
-                pageSize
-            });
-            const pool = this.fingerprintPools.get(fingerprint);
-            response.translations.forEach(record => {
-                if (record.isCustom) {
-                    pool.set(record.text, record.translate);
-                }
-            });
-            // Load more pages if needed
-            while (response.page * response.pageSize < response.total) {
-                page++;
-                const nextResponse = await this.client.getSenseTranslate({
-                    senseId: this.senseId,
-                    fingerprint,
-                    page,
-                    pageSize
-                });
-                nextResponse.translations.forEach(record => {
-                    if (record.isCustom) {
-                        pool.set(record.text, record.translate);
-                    }
-                });
-            }
-        }
+        // Clear current pool
+        this.pool.clear();
         this.currentFingerprint = fingerprint;
+        // Load from localStorage first
+        this.loadFromStorage();
+        // Check if we need to load from backend
+        if (!this.loadedFingerprints.has(fingerprint)) {
+            await this.initialize();
+        }
     }
     /**
      * Clear the current fingerprint to free memory
      */
     clearCurrentFingerprint() {
         this.currentFingerprint = null;
+        this.pool.clear();
     }
     /**
-     * Lookup translation following priority rules:
-     * 1. Current fingerprint special translation
-     * 2. Common translation
-     * 3. Not found
-     *
+     * Lookup translation
      * @param text Original text to lookup
      * @returns Lookup result
      */
     lookup(text) {
-        // Check current fingerprint first
-        if (this.currentFingerprint) {
-            const specialPool = this.fingerprintPools.get(this.currentFingerprint);
-            if (specialPool && specialPool.has(text)) {
-                return {
-                    found: true,
-                    translation: specialPool.get(text),
-                    source: 'special'
-                };
-            }
-        }
-        // Check common pool
-        if (this.commonPool.has(text)) {
+        if (this.pool.has(text)) {
             return {
                 found: true,
-                translation: this.commonPool.get(text),
-                source: 'common'
+                translation: this.pool.get(text),
+                source: this.currentFingerprint ? 'special' : 'common'
             };
         }
         // Not found
@@ -349,28 +286,16 @@ class TranslationPool {
         };
     }
     /**
-     * Add a special translation to the current fingerprint
-     * Requires that a fingerprint is currently active
-     *
+     * Add a translation to the pool
      * @param text Original text
      * @param translation Translated text
-     * @returns true if added successfully, false if no current fingerprint
      */
-    addSpecialTranslation(text, translation) {
-        if (!this.currentFingerprint) {
-            return false;
-        }
-        const specialPool = this.fingerprintPools.get(this.currentFingerprint);
-        if (!specialPool) {
-            return false;
-        }
-        specialPool.set(text, translation);
-        // Broadcast to other tabs
+    addTranslation(text, translation) {
+        this.pool.set(text, translation);
         this.broadcastUpdate(text, translation);
-        return true;
     }
     /**
-     * Request translation from backend, automatically adds to common pool if found
+     * Request translation from backend, automatically adds to pool if found
      *
      * @param text Text to translate
      * @param fromLang Source language
@@ -384,39 +309,19 @@ class TranslationPool {
             toLang,
             senseId: this.senseId
         });
-        // Add to common pool automatically
+        // Add to pool automatically
         if (response.translatedText) {
-            this.commonPool.set(text, response.translatedText);
-            // Broadcast to other tabs
-            this.broadcastUpdate();
+            this.addTranslation(text, response.translatedText);
         }
         return response;
     }
     /**
-     * Get all common translations
+     * Get all translations
      * @returns Array of {text, translation}
      */
-    getAllCommon() {
+    getAll() {
         const result = [];
-        this.commonPool.forEach((translation, text) => {
-            result.push({ text, translation });
-        });
-        return result;
-    }
-    /**
-     * Get all special translations for current fingerprint
-     * @returns Array of {text, translation} or empty if no current fingerprint
-     */
-    getAllCurrentSpecial() {
-        if (!this.currentFingerprint) {
-            return [];
-        }
-        const specialPool = this.fingerprintPools.get(this.currentFingerprint);
-        if (!specialPool) {
-            return [];
-        }
-        const result = [];
-        specialPool.forEach((translation, text) => {
+        this.pool.forEach((translation, text) => {
             result.push({ text, translation });
         });
         return result;
@@ -425,17 +330,13 @@ class TranslationPool {
      * Clear all cached data to free memory
      */
     clearAll() {
-        this.commonPool.clear();
-        this.fingerprintPools.clear();
+        this.pool.clear();
+        this.loadedFingerprints.clear();
         this.currentFingerprint = null;
         // Clear localStorage
         if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
-            const storageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_common`;
+            const storageKey = this.getStorageKey();
             localStorage.removeItem(storageKey);
-            if (this.currentFingerprint) {
-                const fpStorageKey = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${this.currentFingerprint}`;
-                localStorage.removeItem(fpStorageKey);
-            }
         }
         // Broadcast clear to other tabs
         if (this.broadcastChannel && this.crossTabOptions.enabled) {
@@ -468,7 +369,8 @@ class TranslationPool {
  *
  * Features:
  * - Lazy initialization: automatically initializes on first translate() call
- * - Two-level cache: common translations + fingerprint-specific translations
+ * - Streaming batch load: uses streaming API for efficient initialization
+ * - On-demand loading: automatically loads when fingerprint changes
  * - Cross-tab sync: optional Broadcast Channel + localStorage synchronization
  *
  * Usage:
@@ -476,14 +378,17 @@ class TranslationPool {
  * - Advanced: Call initialize() explicitly to preload all translations upfront
  */
 export class TranslationService {
+    client;
+    pool;
+    initialized = false;
+    initPromise = null;
+    options;
     /**
      * Create a new TranslationService instance
      * @param client TranslationClient instance (or base URL string to create one automatically)
      * @param options Translation service options including senseId and optional fingerprint/cross-tab settings
      */
     constructor(client, options) {
-        this.initialized = false;
-        this.initPromise = null;
         if (typeof client === 'string') {
             this.client = new TranslationClient(client);
         }
@@ -503,13 +408,17 @@ export class TranslationService {
         }
         // Create internal translation pool
         this.pool = new TranslationPool(this.client, options.senseId, crossTabOptions);
+        // Set initial fingerprint if provided
+        if (options.fingerprint) {
+            this.pool['currentFingerprint'] = options.fingerprint;
+        }
     }
     /**
      * Ensure the service is initialized (lazy initialization)
      * Called automatically by translate() if needed
      */
     async ensureInitialized() {
-        if (this.initialized) {
+        if (this.initialized && !this.pool.isLoading()) {
             return;
         }
         // Use singleton pattern for initialization promise
@@ -522,16 +431,12 @@ export class TranslationService {
      * Actual initialization logic
      */
     async doInitialize() {
-        // Initialize the pool (loads common translations)
+        // Initialize the pool (loads translations via streaming)
         await this.pool.initialize();
-        // If fingerprint provided in options, switch to it
-        if (this.options.fingerprint) {
-            await this.pool.switchFingerprint(this.options.fingerprint);
-        }
         this.initialized = true;
     }
     /**
-     * Initialize the translation service - loads all common translations from backend
+     * Initialize the translation service - loads all translations from backend
      *
      * This is optional - translate() will automatically initialize if needed.
      * Call this explicitly if you want to preload all translations upfront.
@@ -549,13 +454,15 @@ export class TranslationService {
     }
     /**
      * Switch to a different fingerprint (for personalized/custom translations)
-     * Automatically loads all special translations for this fingerprint
+     * Automatically loads all translations for this fingerprint
      * @param fingerprint - The fingerprint to switch to
      */
     async switchFingerprint(fingerprint) {
-        // Ensure initialized before switching fingerprint
-        await this.ensureInitialized();
+        // Reset initialization state
+        this.initialized = false;
+        this.initPromise = null;
         await this.pool.switchFingerprint(fingerprint);
+        this.initialized = true;
     }
     /**
      * Clear the current fingerprint - frees memory
@@ -564,14 +471,12 @@ export class TranslationService {
         this.pool.clearCurrentFingerprint();
     }
     /**
-     * Add a custom/special translation to the current fingerprint
-     * Requires that a fingerprint is active
+     * Add a custom translation to the current pool
      * @param text - Original text
      * @param translation - Translated text
-     * @returns true if added successfully, false if no current fingerprint
      */
     addCustomTranslation(text, translation) {
-        return this.pool.addSpecialTranslation(text, translation);
+        this.pool.addTranslation(text, translation);
     }
     /**
      * Lookup translation in cache
@@ -587,7 +492,7 @@ export class TranslationService {
      *
      * Features:
      * - Lazy initialization: automatically initializes on first call
-     * - Checks cache first according to priority rules (fingerprint → common)
+     * - Checks cache first
      * - If not found in cache, requests from backend and caches result
      *
      * @param text - Text to translate
@@ -624,9 +529,7 @@ export class TranslationService {
         });
         // Add to cache automatically
         if (response.translatedText) {
-            const poolInternal = this.pool;
-            poolInternal.commonPool?.set(text, response.translatedText);
-            poolInternal.broadcastUpdate?.();
+            this.pool.addTranslation(text, response.translatedText);
         }
         return response;
     }
@@ -688,6 +591,8 @@ export class TranslationService {
  * Uses Map with access order for O(1) get/set operations
  */
 class LRUCache {
+    capacity;
+    cache;
     constructor(capacity = 1000) {
         this.capacity = capacity;
         this.cache = new Map();
@@ -770,6 +675,14 @@ const defaultClientCrossTabOptions = {
  * Includes LRU cache with optional Broadcast Channel + localStorage synchronization
  */
 export class TranslationClient {
+    baseUrl;
+    token;
+    timeout;
+    cache;
+    cacheEnabled;
+    crossTabOptions;
+    broadcastChannel = null;
+    storageKey;
     /**
      * Create a new TranslationClient
      * @param baseUrl Base URL of the gRPC-Web endpoint, defaults to https://api.hottol.com/laker/
@@ -779,7 +692,6 @@ export class TranslationClient {
      * @param crossTabOptions Cross-tab synchronization options (default: disabled)
      */
     constructor(baseUrl = 'https://api.hottol.com/laker/', token = '', timeout = 30000, cacheSize = 1000, crossTabOptions) {
-        this.broadcastChannel = null;
         this.baseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
         this.token = token;
         this.timeout = timeout;
@@ -947,7 +859,7 @@ export class TranslationClient {
         }
     }
     /**
-     * GetSenseTranslate - One-shot unary request with pagination
+  凤   * GetSenseTranslate - One-shot unary request with pagination
      * @param request Request parameters
      */
     async getSenseTranslate(request) {
@@ -962,8 +874,7 @@ export class TranslationClient {
      */
     async translateStream(request, onBatch) {
         const url = `${this.baseUrl}/TranslationService/TranslateStream`;
-        // For gRPC-Web streaming over HTTP, we use GET with SSE-style streaming
-        // This implementation works with the improbabe-eng/grpc-web Go handler
+        // For gRPC-Web streaming over HTTP, we use POST with streaming response
         const response = await this.fetchWithTimeout(url, {
             method: 'POST',
             body: JSON.stringify(request),
@@ -1109,5 +1020,228 @@ export class TranslationClient {
         clearTimeout(id);
         return response;
     }
+}
+/**
+ * AppTranslation - Application-level translation interface
+ * Single entry point for all translation needs with automatic initialization,
+ * intelligent caching, and on-demand loading.
+ *
+ * Features:
+ * - Single entry point: just provide token and senseId
+ * - Automatic streaming batch initialization
+ * - On-demand loading when fingerprint changes
+ * - Intelligent translation with cache-first strategy
+ * - Cross-tab synchronization support
+ *
+ * Usage:
+ * ```typescript
+ * // Create instance
+ * const appTranslate = new AppTranslation({
+ *   token: 'your-jwt-token',
+ *   senseId: 'your-sense-id',
+ *   baseUrl: 'https://api.laker.dev'
+ * });
+ *
+ * // Simple translation - auto-initializes
+ * const result = await appTranslate.translate('Hello', 'zh');
+ *
+ * // Switch fingerprint - auto-loads special translations
+ * await appTranslate.setFingerprint('user-123');
+ *
+ * // Destroy when done
+ * appTranslate.destroy();
+ * ```
+ */
+export class AppTranslation {
+    client;
+    service;
+    config;
+    currentFingerprint = null;
+    useCache;
+    /**
+     * Create a new AppTranslation instance
+     * @param config Configuration options
+     */
+    constructor(config) {
+        this.config = config;
+        // Default to using cache unless explicitly disabled
+        this.useCache = config.useCache !== false;
+        // If cache is disabled, set cacheSize to 0
+        const cacheSize = this.useCache ? (config.cacheSize || 1000) : 0;
+        this.client = new TranslationClient(config.baseUrl || 'https://api.hottol.com/laker/', config.token, config.timeout || 30000, cacheSize, { enabled: config.crossTab ?? false });
+        this.service = new TranslationService(this.client, {
+            senseId: config.senseId,
+            fingerprint: config.fingerprint,
+            crossTab: config.crossTab ?? false
+        });
+        if (config.fingerprint) {
+            this.currentFingerprint = config.fingerprint;
+        }
+    }
+    /**
+     * Update the authentication token
+     * @param token New JWT token
+     */
+    setToken(token) {
+        this.client.setToken(token);
+    }
+    /**
+     * Set or change the current fingerprint
+     * Automatically loads special translations for this fingerprint
+     * @param fingerprint The fingerprint to use
+     */
+    async setFingerprint(fingerprint) {
+        if (this.currentFingerprint === fingerprint) {
+            return;
+        }
+        this.currentFingerprint = fingerprint;
+        await this.service.switchFingerprint(fingerprint);
+    }
+    /**
+     * Clear the current fingerprint
+     * Falls back to common translations
+     */
+    clearFingerprint() {
+        this.currentFingerprint = null;
+        this.service.clearCurrentFingerprint();
+    }
+    /**
+     * Get the current fingerprint
+     */
+    getFingerprint() {
+        return this.currentFingerprint;
+    }
+    /**
+     * Translate text with automatic caching and initialization
+     *
+     * - First call initializes the service automatically
+     * - Checks cache first (fingerprint-specific → common)
+     * - Falls back to LLM translation if not found
+     * - Caches result automatically (unless useCache: false)
+     *
+     * @param text Text to translate
+     * @param toLang Target language code (e.g., 'zh', 'en')
+     * @param fromLang Optional source language code (auto-detected if not provided)
+     * @returns Translation result
+     */
+    async translate(text, toLang, fromLang) {
+        const response = await this.service.translate(text, toLang, fromLang);
+        return response.translatedText;
+    }
+    /**
+     * Translate text with full response details
+     * @param text Text to translate
+     * @param toLang Target language code
+     * @param fromLang Optional source language code
+     * @returns Full translation response
+     */
+    async translateWithDetails(text, toLang, fromLang) {
+        return this.service.translate(text, toLang, fromLang);
+    }
+    /**
+     * Translate text without using cache (always request from backend)
+     * @param text Text to translate
+     * @param toLang Target language code
+     * @param fromLang Optional source language code
+     * @returns Translation result
+     */
+    async translateNoCache(text, toLang, fromLang) {
+        const response = await this.service.translateDirect(text, toLang, fromLang);
+        return response.translatedText;
+    }
+    /**
+     * Batch translate multiple texts
+     * @param texts Array of texts to translate
+     * @param toLang Target language code
+     * @param fromLang Optional source language code
+     * @returns Array of translated texts in same order
+     */
+    async translateBatch(texts, toLang, fromLang) {
+        const results = await Promise.all(texts.map(text => this.translate(text, toLang, fromLang)));
+        return results;
+    }
+    /**
+     * Check if cache is enabled
+     * @returns true if cache is enabled
+     */
+    isCacheEnabled() {
+        return this.useCache;
+    }
+    /**
+     * Check if a translation exists in cache
+     * @param text Text to check
+     * @returns true if translation exists in cache
+     */
+    hasTranslation(text) {
+        if (!this.useCache) {
+            return false;
+        }
+        return this.service.lookup(text).found;
+    }
+    /**
+     * Get translation from cache without requesting from backend
+     * @param text Text to look up
+     * @returns Translation if found, null otherwise
+     */
+    getCached(text) {
+        if (!this.useCache) {
+            return null;
+        }
+        const result = this.service.lookup(text);
+        return result.found ? result.translation : null;
+    }
+    /**
+     * Add a custom translation to the cache
+     * @param text Original text
+     * @param translation Translated text
+     */
+    addTranslation(text, translation) {
+        if (this.useCache) {
+            this.service.addCustomTranslation(text, translation);
+        }
+    }
+    /**
+     * Preload all translations for current context
+     * Call this to warm up the cache before translating
+     */
+    async preload() {
+        if (this.useCache) {
+            await this.service.initialize();
+        }
+    }
+    /**
+     * Check if the service is initialized
+     */
+    isInitialized() {
+        return this.service.isInitialized();
+    }
+    /**
+     * Clear all cached translations
+     */
+    clearCache() {
+        this.service.clearAll();
+        this.client.clearCache();
+    }
+    /**
+     * Destroy the instance and free resources
+     * Call this when the instance is no longer needed
+     */
+    destroy() {
+        this.service.destroy();
+    }
+}
+/**
+ * Create an AppTranslation instance with simplified configuration
+ * @param token JWT authentication token
+ * @param senseId Translation sense ID
+ * @param options Additional options
+ * @returns AppTranslation instance
+ */
+export function createTranslation(token, senseId, options) {
+    return new AppTranslation({
+        token,
+        senseId,
+        ...options
+    });
 }
 export default TranslationClient;

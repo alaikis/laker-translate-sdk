@@ -99,7 +99,8 @@ export interface TranslationServiceOptions {
  *
  * Features:
  * - Lazy initialization: automatically initializes on first translate() call
- * - Two-level cache: common translations + fingerprint-specific translations
+ * - Streaming batch load: uses streaming API for efficient initialization
+ * - On-demand loading: automatically loads when fingerprint changes
  * - Cross-tab sync: optional Broadcast Channel + localStorage synchronization
  *
  * Usage:
@@ -128,7 +129,7 @@ export declare class TranslationService {
      */
     private doInitialize;
     /**
-     * Initialize the translation service - loads all common translations from backend
+     * Initialize the translation service - loads all translations from backend
      *
      * This is optional - translate() will automatically initialize if needed.
      * Call this explicitly if you want to preload all translations upfront.
@@ -142,7 +143,7 @@ export declare class TranslationService {
     isInitialized(): boolean;
     /**
      * Switch to a different fingerprint (for personalized/custom translations)
-     * Automatically loads all special translations for this fingerprint
+     * Automatically loads all translations for this fingerprint
      * @param fingerprint - The fingerprint to switch to
      */
     switchFingerprint(fingerprint: string): Promise<void>;
@@ -151,13 +152,11 @@ export declare class TranslationService {
      */
     clearCurrentFingerprint(): void;
     /**
-     * Add a custom/special translation to the current fingerprint
-     * Requires that a fingerprint is active
+     * Add a custom translation to the current pool
      * @param text - Original text
      * @param translation - Translated text
-     * @returns true if added successfully, false if no current fingerprint
      */
-    addCustomTranslation(text: string, translation: string): boolean;
+    addCustomTranslation(text: string, translation: string): void;
     /**
      * Lookup translation in cache
      * Note: If not initialized, will return not found
@@ -170,7 +169,7 @@ export declare class TranslationService {
      *
      * Features:
      * - Lazy initialization: automatically initializes on first call
-     * - Checks cache first according to priority rules (fingerprint → common)
+     * - Checks cache first
      * - If not found in cache, requests from backend and caches result
      *
      * @param text - Text to translate
@@ -295,7 +294,7 @@ export declare class TranslationClient {
      */
     destroy(): void;
     /**
-     * GetSenseTranslate - One-shot unary request with pagination
+  凤   * GetSenseTranslate - One-shot unary request with pagination
      * @param request Request parameters
      */
     getSenseTranslate(request: GetSenseTranslateRequest): Promise<GetSenseTranslateResponse>;
@@ -329,4 +328,175 @@ export declare class TranslationClient {
     private fetchJson;
     private fetchWithTimeout;
 }
+/**
+ * AppTranslation - Application-level translation interface
+ * Single entry point for all translation needs with automatic initialization,
+ * intelligent caching, and on-demand loading.
+ *
+ * Features:
+ * - Single entry point: just provide token and senseId
+ * - Automatic streaming batch initialization
+ * - On-demand loading when fingerprint changes
+ * - Intelligent translation with cache-first strategy
+ * - Cross-tab synchronization support
+ *
+ * Usage:
+ * ```typescript
+ * // Create instance
+ * const appTranslate = new AppTranslation({
+ *   token: 'your-jwt-token',
+ *   senseId: 'your-sense-id',
+ *   baseUrl: 'https://api.laker.dev'
+ * });
+ *
+ * // Simple translation - auto-initializes
+ * const result = await appTranslate.translate('Hello', 'zh');
+ *
+ * // Switch fingerprint - auto-loads special translations
+ * await appTranslate.setFingerprint('user-123');
+ *
+ * // Destroy when done
+ * appTranslate.destroy();
+ * ```
+ */
+export declare class AppTranslation {
+    private client;
+    private service;
+    private config;
+    private currentFingerprint;
+    private useCache;
+    /**
+     * Create a new AppTranslation instance
+     * @param config Configuration options
+     */
+    constructor(config: AppTranslationConfig);
+    /**
+     * Update the authentication token
+     * @param token New JWT token
+     */
+    setToken(token: string): void;
+    /**
+     * Set or change the current fingerprint
+     * Automatically loads special translations for this fingerprint
+     * @param fingerprint The fingerprint to use
+     */
+    setFingerprint(fingerprint: string): Promise<void>;
+    /**
+     * Clear the current fingerprint
+     * Falls back to common translations
+     */
+    clearFingerprint(): void;
+    /**
+     * Get the current fingerprint
+     */
+    getFingerprint(): string | null;
+    /**
+     * Translate text with automatic caching and initialization
+     *
+     * - First call initializes the service automatically
+     * - Checks cache first (fingerprint-specific → common)
+     * - Falls back to LLM translation if not found
+     * - Caches result automatically (unless useCache: false)
+     *
+     * @param text Text to translate
+     * @param toLang Target language code (e.g., 'zh', 'en')
+     * @param fromLang Optional source language code (auto-detected if not provided)
+     * @returns Translation result
+     */
+    translate(text: string, toLang: string, fromLang?: string): Promise<string>;
+    /**
+     * Translate text with full response details
+     * @param text Text to translate
+     * @param toLang Target language code
+     * @param fromLang Optional source language code
+     * @returns Full translation response
+     */
+    translateWithDetails(text: string, toLang: string, fromLang?: string): Promise<LLMTranslateResponse>;
+    /**
+     * Translate text without using cache (always request from backend)
+     * @param text Text to translate
+     * @param toLang Target language code
+     * @param fromLang Optional source language code
+     * @returns Translation result
+     */
+    translateNoCache(text: string, toLang: string, fromLang?: string): Promise<string>;
+    /**
+     * Batch translate multiple texts
+     * @param texts Array of texts to translate
+     * @param toLang Target language code
+     * @param fromLang Optional source language code
+     * @returns Array of translated texts in same order
+     */
+    translateBatch(texts: string[], toLang: string, fromLang?: string): Promise<string[]>;
+    /**
+     * Check if cache is enabled
+     * @returns true if cache is enabled
+     */
+    isCacheEnabled(): boolean;
+    /**
+     * Check if a translation exists in cache
+     * @param text Text to check
+     * @returns true if translation exists in cache
+     */
+    hasTranslation(text: string): boolean;
+    /**
+     * Get translation from cache without requesting from backend
+     * @param text Text to look up
+     * @returns Translation if found, null otherwise
+     */
+    getCached(text: string): string | null;
+    /**
+     * Add a custom translation to the cache
+     * @param text Original text
+     * @param translation Translated text
+     */
+    addTranslation(text: string, translation: string): void;
+    /**
+     * Preload all translations for current context
+     * Call this to warm up the cache before translating
+     */
+    preload(): Promise<void>;
+    /**
+     * Check if the service is initialized
+     */
+    isInitialized(): boolean;
+    /**
+     * Clear all cached translations
+     */
+    clearCache(): void;
+    /**
+     * Destroy the instance and free resources
+     * Call this when the instance is no longer needed
+     */
+    destroy(): void;
+}
+/**
+ * Configuration for AppTranslation
+ */
+export interface AppTranslationConfig {
+    /** JWT authentication token */
+    token: string;
+    /** Translation sense ID */
+    senseId: string;
+    /** API base URL (optional, defaults to https://api.hottol.com/laker/) */
+    baseUrl?: string;
+    /** Request timeout in milliseconds (optional, defaults to 30000) */
+    timeout?: number;
+    /** LRU cache size (optional, defaults to 1000, set to 0 to disable cache) */
+    cacheSize?: number;
+    /** Initial fingerprint (optional) */
+    fingerprint?: string;
+    /** Enable cross-tab synchronization (optional, defaults to false) */
+    crossTab?: boolean;
+    /** Enable cache (optional, defaults to true. Set to false to disable all caching) */
+    useCache?: boolean;
+}
+/**
+ * Create an AppTranslation instance with simplified configuration
+ * @param token JWT authentication token
+ * @param senseId Translation sense ID
+ * @param options Additional options
+ * @returns AppTranslation instance
+ */
+export declare function createTranslation(token: string, senseId: string, options?: Partial<AppTranslationConfig>): AppTranslation;
 export default TranslationClient;
