@@ -1,6 +1,6 @@
 {
-	"name": "@laker/translation-sdk",
-	"version": "1.0.0",
+	"name": "@alaikis/translation-sdk",
+	"version": "1.0.2",
 	"description": "Laker Translation Service SDK for TypeScript/JavaScript",
 	"main": "translation-client.js",
 	"types": "translation-client.d.ts",

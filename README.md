@@ -9,6 +9,8 @@ Laker Translation Service SDK for multiple programming languages.
 - [TypeScript/JavaScript](./js/) - Browser and Node.js
 - [Go](./go/) - Go language
 - [PHP](./php/) - PHP language
+- [Python](./python/) - Python language
+- [Java](./java/) - Java language
 
 ## Features
 

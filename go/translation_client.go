@@ -34,6 +34,8 @@ type GetSenseTranslateRequest struct {
 	Fingerprint *string `json:"fingerprint,omitempty"`
 	Page        int32   `json:"page,omitempty"`
 	PageSize    int32   `json:"pageSize,omitempty"`
+	SrcLang     *string `json:"src_lang,omitempty"`
+	DstLang     *string `json:"dst_lang,omitempty"`
 }
 
 // GetSenseTranslateResponse represents the response for a sense translation query

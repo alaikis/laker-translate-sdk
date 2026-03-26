@@ -18,6 +18,8 @@ export interface GetSenseTranslateRequest {
   fingerprint?: string;
   page?: number;
   pageSize?: number;
+  src_lang?: string;
+  dst_lang?: string;
 }
 
 export interface GetSenseTranslateResponse {
@@ -25,7 +27,7 @@ export interface GetSenseTranslateResponse {
   total: number;
   page: number;
   pageSize: number;
-  translations: TranslateRecord[];
+  result: TranslateRecord[];
 }
 
 export interface TranslateStreamRequest {
@@ -152,28 +154,34 @@ export function extractTemplate(text: string): TemplateExtractResult {
 export interface TranslationServiceOptions {
   senseId: string;
   fingerprint?: string;
+  fromLang?: string;
+  toLang?: string;
   crossTab?: boolean;
   crossTabChannelName?: string;
   crossTabStorageKeyPrefix?: string;
 }
 
 /**
- * TranslationPool - Single-level translation cache (simplified for new API)
+ * TranslationPool - Multi-fingerprint translation cache with automatic common preloading
  *
  * Architecture:
- * - pool: stores translations (from backend, unified result field)
+ * - pools: Map of fingerprint -> Map<text, translation> (each fingerprint has independent cache)
  * - currentFingerprint: current active fingerprint for special translations
+ * - common is always loaded and cached forever, never cleared unless full clear happens
  * - Optional cross-tab synchronization via Broadcast Channel and localStorage
  *
  * Rules:
- * - If fingerprint exists, load special translations
- * - If no fingerprint, load common translations
- * - All translations stored in single pool with unified access
+ * - common translations are always loaded on initialization and cached forever
+ * - If fingerprint exists, load special translations for that fingerprint
+ * - Switching fingerprints doesn't clear cached data for other fingerprints
+ * - Lookup priority: current fingerprint first, common second
+ * - All translations are cached independently by fingerprint
  */
 class TranslationPool {
   private client: TranslationClient;
   private senseId: string;
-  private pool: Map<string, string> = new Map();
+  // Separate cache for each fingerprint: fingerprint -> Map<text, translation>
+  private pools: Map<string, Map<string, string>> = new Map();
   private currentFingerprint: string | null = null;
   private crossTabOptions: CrossTabOptions;
   private broadcastChannel: BroadcastChannel | null = null;
@@ -190,6 +198,9 @@ class TranslationPool {
     this.client = client;
     this.senseId = senseId;
     this.crossTabOptions = { ...defaultCrossTabOptions, ...crossTabOptions };
+    
+    // Initialize common pool always
+    this.pools.set('common', new Map());
     
     if (this.crossTabOptions.enabled && typeof BroadcastChannel !== 'undefined') {
       this.initCrossTabSync();
@@ -241,14 +252,33 @@ class TranslationPool {
       return;
     }
     
-    const storageKey = this.getStorageKey();
+    // Always load common first
+    this.loadFingerprintFromStorage('common');
+    
+    // Load current fingerprint if exists
+    if (this.currentFingerprint) {
+      this.loadFingerprintFromStorage(this.currentFingerprint);
+    }
+  }
+  
+  /**
+   * Load a specific fingerprint's cache from localStorage
+   */
+  private loadFingerprintFromStorage(fp: string): void {
+    const storageKey = this.getStorageKey(fp);
     try {
       const stored = localStorage.getItem(storageKey);
       if (stored) {
         const data = JSON.parse(stored) as Array<{ text: string; translation: string }>;
+        let pool = this.pools.get(fp);
+        if (!pool) {
+          pool = new Map();
+          this.pools.set(fp, pool);
+        }
         data.forEach(({ text, translation }) => {
-          this.pool.set(text, translation);
+          pool.set(text, translation);
         });
+        this.loadedFingerprints.add(fp);
       }
     } catch (e) {
       console.warn('Failed to load translation cache from localStorage:', e);
@@ -256,24 +286,29 @@ class TranslationPool {
   }
   
   /**
-   * Get storage key based on current fingerprint
+   * Get storage key for a specific fingerprint
    */
-  private getStorageKey(): string {
-    const fp = this.currentFingerprint || 'common';
+  private getStorageKey(fp: string): string {
     return `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${fp}`;
   }
   
   /**
    * Save cache to localStorage
    */
-  private saveToStorage(): void {
+  private saveToStorage(fp: string): void {
     if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
       return;
     }
     
-    const storageKey = this.getStorageKey();
+    const storageKey = this.getStorageKey(fp);
     try {
-      const data = this.getAll();
+      const pool = this.pools.get(fp);
+      const data: Array<{ text: string; translation: string }> = [];
+      if (pool) {
+        pool.forEach((translation, text) => {
+          data.push({ text, translation });
+        });
+      }
       localStorage.setItem(storageKey, JSON.stringify(data));
     } catch (e) {
       console.warn('Failed to save translation cache to localStorage:', e);
@@ -288,36 +323,46 @@ class TranslationPool {
       return;
     }
     
+    const fp = this.currentFingerprint || 'common';
     const message: CrossTabMessage = {
       type: 'cache_update',
       senseId: this.senseId,
       fingerprint: this.currentFingerprint || undefined,
       data: {
-        result: this.getAll(),
+        result: this.getAllForFingerprint(fp),
         ...(text && translation && { text, translation })
       }
     };
     
     this.broadcastChannel.postMessage(message);
-    this.saveToStorage();
+    this.saveToStorage(fp);
   }
   
   /**
    * Handle incoming cache update from another tab
    */
   private handleCacheUpdate(message: CrossTabMessage): void {
+    const fp = message.fingerprint || 'common';
     if (message.data?.result) {
-      // Update full cache
-      this.pool.clear();
+      // Update full cache for this fingerprint
+      let pool = this.pools.get(fp);
+      if (!pool) {
+        pool = new Map();
+        this.pools.set(fp, pool);
+      }
+      pool.clear();
       message.data.result.forEach(({ text, translation }) => {
-        this.pool.set(text, translation);
+        pool.set(text, translation);
       });
+      this.loadedFingerprints.add(fp);
     }
     
     // Update specific entry
     if (message.data?.text && message.data?.translation) {
-      this.pool.set(message.data.text, message.data.translation);
-      this.saveToStorage();
+      const pool = this.pools.get(fp) || new Map();
+      pool.set(message.data.text, message.data.translation);
+      this.pools.set(fp, pool);
+      this.saveToStorage(fp);
     }
   }
   
@@ -325,7 +370,12 @@ class TranslationPool {
    * Handle incoming cache clear from another tab
    */
   private handleCacheClear(message: CrossTabMessage): void {
-    this.clearAll();
+    const fp = message.fingerprint || 'common';
+    if (fp) {
+      this.clearFingerprint(fp);
+    } else {
+      this.clearAll();
+    }
   }
   
   /**
@@ -344,41 +394,26 @@ class TranslationPool {
   }
   
   /**
-   * Initialize the pool - loads translations from backend using streaming
-   * If fingerprint is set, loads special translations; otherwise loads common
+   * Initialize the pool - always loads common first, then loads current fingerprint if set
+   * If fingerprint is set, loads special translations; common is always preloaded
    */
   async initialize(): Promise<void> {
     if (this.loading) {
       return;
     }
     
-    // Check if already loaded for this fingerprint
-    const fpKey = this.currentFingerprint || 'common';
-    if (this.loadedFingerprints.has(fpKey) && this.pool.size > 0) {
-      return;
-    }
-    
     this.loading = true;
     
     try {
-      // Use streaming for batch loading
-      await this.client.translateStream(
-        {
-          senseId: this.senseId,
-          fingerprint: this.currentFingerprint || undefined,
-          batchSize: 500
-        },
-        (response) => {
-          // Add all translations from this batch
-          response.translations.forEach(record => {
-            this.pool.set(record.text, record.translate);
-          });
-          return true; // Continue streaming
-        }
-      );
+      // Always preload common first (required)
+      if (!this.loadedFingerprints.has('common')) {
+        await this.loadFingerprintTranslations('common', undefined);
+      }
       
-      // Mark as loaded
-      this.loadedFingerprints.add(fpKey);
+      // Then load current fingerprint if set and not loaded
+      if (this.currentFingerprint && !this.loadedFingerprints.has(this.currentFingerprint)) {
+        await this.loadFingerprintTranslations(this.currentFingerprint, this.currentFingerprint);
+      }
       
       // Broadcast to other tabs after full initialization
       this.broadcastUpdate();
@@ -388,42 +423,116 @@ class TranslationPool {
   }
   
   /**
-   * Switch to a different fingerprint, loads its translations
+   * Load translations for a specific fingerprint
+   */
+  private async loadFingerprintTranslations(fp: string, fingerprint: string | undefined): Promise<void> {
+    // Already loaded
+    if (this.loadedFingerprints.has(fp)) {
+      return;
+    }
+    
+    // Ensure pool exists for this fingerprint
+    let pool = this.pools.get(fp);
+    if (!pool) {
+      pool = new Map();
+      this.pools.set(fp, pool);
+    }
+    
+    // Use streaming for batch loading
+    await this.client.translateStream(
+      {
+        senseId: this.senseId,
+        fingerprint,
+        batchSize: 500
+      },
+      (response) => {
+        // Add all translations from this batch to the fingerprint's pool
+        response.translations.forEach(record => {
+          pool!.set(record.text, record.translate);
+        });
+        return true; // Continue streaming
+      }
+    );
+    
+    // Mark as loaded
+    this.loadedFingerprints.add(fp);
+  }
+  
+  /**
+   * Switch to a different fingerprint, loads its translations if not already loaded
+   * Doesn't clear existing cached translations for other fingerprints
    * @param fingerprint The fingerprint to switch to
    */
   async switchFingerprint(fingerprint: string): Promise<void> {
-    // Clear current pool
-    this.pool.clear();
     this.currentFingerprint = fingerprint;
     
+    // Ensure pool exists
+    if (!this.pools.has(fingerprint)) {
+      this.pools.set(fingerprint, new Map());
+    }
+    
     // Load from localStorage first
-    this.loadFromStorage();
+    this.loadFingerprintFromStorage(fingerprint);
     
     // Check if we need to load from backend
     if (!this.loadedFingerprints.has(fingerprint)) {
-      await this.initialize();
+      await this.loadFingerprintTranslations(fingerprint, fingerprint);
     }
   }
   
   /**
-   * Clear the current fingerprint to free memory
+   * Clear cached translations for a specific fingerprint to free memory
+   * Doesn't affect other fingerprints or common
+   * @param fingerprint The fingerprint to clear
+   */
+  clearFingerprint(fingerprint: string): void {
+    this.pools.delete(fingerprint);
+    this.loadedFingerprints.delete(fingerprint);
+    
+    // Clear localStorage
+    if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
+      const storageKey = this.getStorageKey(fingerprint);
+      localStorage.removeItem(storageKey);
+    }
+  }
+  
+  /**
+   * Clear the current fingerprint to free memory (switch back to common)
+   * Current fingerprint becomes null, only common remains active
    */
   clearCurrentFingerprint(): void {
-    this.currentFingerprint = null;
-    this.pool.clear();
+    if (this.currentFingerprint) {
+      this.clearFingerprint(this.currentFingerprint);
+      this.currentFingerprint = null;
+    }
   }
   
   /**
    * Lookup translation
+   * Priority: current fingerprint (if set) → common → not found
    * @param text Original text to lookup
    * @returns Lookup result
    */
   lookup(text: string): TranslationLookupResult {
-    if (this.pool.has(text)) {
+    // Check current fingerprint first if we have one
+    if (this.currentFingerprint) {
+      const currentPool = this.pools.get(this.currentFingerprint);
+      if (currentPool && currentPool.has(text)) {
+        return {
+          found: true,
+          translation: currentPool.get(text)!,
+          source: 'special'
+        };
+      }
+    }
+    
+    // Fallback to common
+    const commonPool = this.pools.get('common');
+    if (commonPool && commonPool.has(text)) {
       return {
         found: true,
-        translation: this.pool.get(text)!,
-        source: this.currentFingerprint ? 'special' : 'common'
+        translation: commonPool.get(text)!,
+        source: 'common'
       };
     }
     
@@ -437,11 +546,18 @@ class TranslationPool {
   
   /**
    * Add a translation to the pool
+   * Adds to current fingerprint pool (or common if no fingerprint set)
    * @param text Original text
    * @param translation Translated text
    */
   addTranslation(text: string, translation: string): void {
-    this.pool.set(text, translation);
+    const fp = this.currentFingerprint || 'common';
+    let pool = this.pools.get(fp);
+    if (!pool) {
+      pool = new Map();
+      this.pools.set(fp, pool);
+    }
+    pool.set(text, translation);
     this.broadcastUpdate(text, translation);
   }
   
@@ -474,14 +590,27 @@ class TranslationPool {
   }
   
   /**
-   * Get all translations
+   * Get all translations for current fingerprint (includes common if needed)
    * @returns Array of {text, translation}
    */
   getAll(): Array<{ text: string; translation: string }> {
+    const fp = this.currentFingerprint || 'common';
+    return this.getAllForFingerprint(fp);
+  }
+  
+  /**
+   * Get all translations for a specific fingerprint
+   * @param fp Fingerprint name
+   * @returns Array of {text, translation}
+   */
+  getAllForFingerprint(fp: string): Array<{ text: string; translation: string }> {
     const result: Array<{ text: string; translation: string }> = [];
-    this.pool.forEach((translation, text) => {
-      result.push({ text, translation });
-    });
+    const pool = this.pools.get(fp);
+    if (pool) {
+      pool.forEach((translation, text) => {
+        result.push({ text, translation });
+      });
+    }
     return result;
   }
   
@@ -489,13 +618,18 @@ class TranslationPool {
    * Clear all cached data to free memory
    */
   clearAll(): void {
-    this.pool.clear();
+    // Clear all fingerprints from memory
+    this.pools.clear();
     this.loadedFingerprints.clear();
     this.currentFingerprint = null;
     
-    // Clear localStorage
+    // Re-initialize common pool
+    this.pools.set('common', new Map());
+    
+    // Clear all localStorage for this sense
     if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
-      const storageKey = this.getStorageKey();
+      // We can't easily iterate all fingerprints, but at least clear common
+      const storageKey = this.getStorageKey('common');
       localStorage.removeItem(storageKey);
     }
     
@@ -503,7 +637,8 @@ class TranslationPool {
     if (this.broadcastChannel && this.crossTabOptions.enabled) {
       this.broadcastChannel.postMessage({
         type: 'cache_clear',
-        senseId: this.senseId
+        senseId: this.senseId,
+        fingerprint: undefined
       });
     }
   }
@@ -527,8 +662,8 @@ class TranslationPool {
   }
 }
 
-/**
- * TranslationService - Main entry point for translation operations
+ /**
+  * TranslationService - Main entry point for translation operations
  * Provides a clean API with automatic caching and cross-tab synchronization
  * 
  * Features:
@@ -649,6 +784,31 @@ export class TranslationService {
   }
 
   /**
+   * Get all available translations for a semantic sense
+   * @param senseId - Semantic sense ID
+   * @param fingerprint - Optional special fingerprint for personalized translations
+   * If not provided, uses the fingerprint configured at service initialization
+   * @returns Promise resolving to list of available translation strings
+   */
+  async getSenseTranslations(senseId: string, fingerprint?: string): Promise<string[]> {
+    const response = await this.client.getSenseTranslate({
+      senseId,
+      fingerprint,
+      page: 1,
+      pageSize: 1000
+    });
+    
+    const translations: string[] = [];
+    response.result.forEach(record => {
+      if (record.translate && record.translate.trim()) {
+        translations.push(record.translate);
+      }
+    });
+    
+    return translations;
+  }
+
+  /**
    * Add a custom translation to the current pool
    * @param text - Original text
    * @param translation - Translated text
@@ -683,12 +843,16 @@ export class TranslationService {
    */
   async translate(
     text: string,
-    toLang: string,
+    toLang?: string,
     fromLang?: string,
     provider?: string
   ): Promise<LLMTranslateResponse> {
     // Lazy initialization - ensure initialized before checking cache
     await this.ensureInitialized();
+
+    // Use configured languages from options if not provided as arguments
+    const finalToLang = toLang ?? this.options.toLang;
+    const finalFromLang = fromLang ?? this.options.fromLang;
 
     // Check cache first
     const lookupResult = this.lookup(text);
@@ -700,8 +864,8 @@ export class TranslationService {
         timestamp: Date.now(),
         finished: true,
         cached: true,
-        fromLang: fromLang,
-        toLang: toLang,
+        fromLang: finalFromLang,
+        toLang: finalToLang,
       };
     }
 
@@ -709,8 +873,8 @@ export class TranslationService {
     const senseId = this.getSenseId();
     const response = await this.client.llmTranslate({
       text,
-      toLang,
-      fromLang,
+      toLang: finalToLang!,
+      fromLang: finalFromLang,
       provider,
       senseId,
     });
@@ -735,15 +899,18 @@ export class TranslationService {
    */
   async translateDirect(
     text: string,
-    toLang: string,
+    toLang?: string,
     fromLang?: string,
     provider?: string
   ): Promise<LLMTranslateResponse> {
     const senseId = this.getSenseId();
+    // Use configured languages from options if not provided as arguments
+    const finalToLang = toLang ?? this.options.toLang;
+    const finalFromLang = fromLang ?? this.options.fromLang;
     return this.client.llmTranslate({
       text,
-      toLang,
-      fromLang,
+      toLang: finalToLang!,
+      fromLang: finalFromLang,
       provider,
       senseId,
     });
@@ -1607,6 +1774,4 @@ export function createTranslation(
     senseId,
     ...options
   });
-}
-
-export default TranslationClient;
+}export default createTranslation;
