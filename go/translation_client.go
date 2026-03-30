@@ -144,9 +144,9 @@ func (p *TranslationPool) Initialize(ctx context.Context) error {
 		return err
 	}
 
-	// Add all common translations
+	// Add all common translations (IsCustom == false means common)
 	for _, record := range resp.Translations {
-		if record.IsCustom {
+		if !record.IsCustom {
 			p.commonPool[record.Text] = record.Translate
 		}
 	}
@@ -163,7 +163,7 @@ func (p *TranslationPool) Initialize(ctx context.Context) error {
 			return err
 		}
 		for _, record := range resp.Translations {
-			if record.IsCustom {
+			if !record.IsCustom {
 				p.commonPool[record.Text] = record.Translate
 			}
 		}
@@ -196,6 +196,7 @@ func (p *TranslationPool) SwitchFingerprint(ctx context.Context, fingerprint str
 
 		pool := p.fingerprintPools[fingerprint]
 		for _, record := range resp.Translations {
+			// Special translations are those with IsCustom == true
 			if record.IsCustom {
 				pool[record.Text] = record.Translate
 			}
@@ -214,6 +215,7 @@ func (p *TranslationPool) SwitchFingerprint(ctx context.Context, fingerprint str
 				return err
 			}
 			for _, record := range resp.Translations {
+				// Special translations are those with IsCustom == true
 				if record.IsCustom {
 					pool[record.Text] = record.Translate
 				}

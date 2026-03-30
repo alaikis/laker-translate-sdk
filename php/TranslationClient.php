@@ -348,8 +348,9 @@ class TranslationPool
             new GetSenseTranslateRequest($this->senseId, null, $page, $pageSize)
         );
 
+        // Common translations have isCustom == false
         foreach ($response->translations as $record) {
-            if ($record->isCustom) {
+            if (!$record->isCustom) {
                 $this->commonPool[$record->text] = $record->translate;
             }
         }
@@ -359,8 +360,9 @@ class TranslationPool
             $response = $this->client->getSenseTranslate(
                 new GetSenseTranslateRequest($this->senseId, null, $page, $pageSize)
             );
+            // Common translations have isCustom == false
             foreach ($response->translations as $record) {
-                if ($record->isCustom) {
+                if (!$record->isCustom) {
                     $this->commonPool[$record->text] = $record->translate;
                 }
             }

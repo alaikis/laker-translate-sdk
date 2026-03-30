@@ -1,6 +1,6 @@
 {
 	"name": "@alaikis/translation-sdk",
-	"version": "1.0.2",
+	"version": "1.2.2",
 	"description": "Laker Translation Service SDK for TypeScript/JavaScript",
 	"main": "translation-client.js",
 	"types": "translation-client.d.ts",
@@ -8,6 +8,9 @@
 		"*.js",
 		"*.d.ts"
 	],
+	"scripts": {
+		"build": "npx tsc && npx rollup --config rollup.config.js"
+	},
 	"keywords": [
 		"translation",
 		"grpc-web",
@@ -24,5 +27,11 @@
 	"bugs": {
 		"url": "https://github.com/alaikis/laker-translate-sdk/issues"
 	},
-	"homepage": "https://github.com/alaikis/laker-translate-sdk#readme"
+	"homepage": "https://github.com/alaikis/laker-translate-sdk#readme",
+	"devDependencies": {
+		"@rollup/plugin-typescript": "^12.3.0",
+		"rollup": "^4.60.0",
+		"tslib": "^2.8.1",
+		"typescript": "^6.0.2"
+	}
 }

@@ -59,6 +59,7 @@ export interface LLMTranslateRequest {
   toLang: string;
   provider?: string;
   senseId?: string;
+  fingerprint?: string;
 }
 
 export interface LLMTranslateResponse {
@@ -497,6 +498,32 @@ class TranslationPool {
   }
   
   /**
+   * Check if a fingerprint has been loaded
+   * @param fingerprint Fingerprint to check
+   */
+  isLoaded(fingerprint: string): boolean {
+    return this.loadedFingerprints.has(fingerprint);
+  }
+  
+  /**
+   * Load a fingerprint if not already loaded
+   * @param fingerprint Fingerprint to load
+   */
+  async loadFingerprintIfNotLoaded(fingerprint: string): Promise<void> {
+    if (this.loadedFingerprints.has(fingerprint)) {
+      return;
+    }
+    
+    // Load from localStorage first
+    this.loadFingerprintFromStorage(fingerprint);
+    
+    // Check if still not loaded after localStorage
+    if (!this.loadedFingerprints.has(fingerprint)) {
+      await this.loadFingerprintTranslations(fingerprint, fingerprint);
+    }
+  }
+  
+  /**
    * Clear the current fingerprint to free memory (switch back to common)
    * Current fingerprint becomes null, only common remains active
    */
@@ -509,13 +536,26 @@ class TranslationPool {
   
   /**
    * Lookup translation
-   * Priority: current fingerprint (if set) → common → not found
+   * Priority: provided fingerprint (if any) → current fingerprint (if set) → common → not found
    * @param text Original text to lookup
+   * @param fingerprint Optional specific fingerprint to lookup (overrides current fingerprint)
    * @returns Lookup result
    */
-  lookup(text: string): TranslationLookupResult {
-    // Check current fingerprint first if we have one
-    if (this.currentFingerprint) {
+  lookup(text: string, fingerprint?: string): TranslationLookupResult {
+    // Check provided fingerprint first if given
+    if (fingerprint) {
+      const targetPool = this.pools.get(fingerprint);
+      if (targetPool && targetPool.has(text)) {
+        return {
+          found: true,
+          translation: targetPool.get(text)!,
+          source: 'special'
+        };
+      }
+    }
+    
+    // Check current fingerprint next if we have one and no specific fingerprint provided
+    if (!fingerprint && this.currentFingerprint) {
       const currentPool = this.pools.get(this.currentFingerprint);
       if (currentPool && currentPool.has(text)) {
         return {
@@ -549,9 +589,10 @@ class TranslationPool {
    * Adds to current fingerprint pool (or common if no fingerprint set)
    * @param text Original text
    * @param translation Translated text
+   * @param fingerprint Optional specific fingerprint to add to (overrides current fingerprint)
    */
-  addTranslation(text: string, translation: string): void {
-    const fp = this.currentFingerprint || 'common';
+  addTranslation(text: string, translation: string, fingerprint?: string): void {
+    const fp = fingerprint || this.currentFingerprint || 'common';
     let pool = this.pools.get(fp);
     if (!pool) {
       pool = new Map();
@@ -675,286 +716,7 @@ class TranslationPool {
  * Usage:
  * - Simple: Just create and call translate() - initialization is automatic
  * - Advanced: Call initialize() explicitly to preload all translations upfront
- */
-export class TranslationService {
-  private client: TranslationClient;
-  private pool: TranslationPool;
-  private initialized: boolean = false;
-  private initPromise: Promise<void> | null = null;
-  private options: TranslationServiceOptions;
-
-  /**
-   * Create a new TranslationService instance
-   * @param client TranslationClient instance (or base URL string to create one automatically)
-   * @param options Translation service options including senseId and optional fingerprint/cross-tab settings
-   */
-  constructor(client: TranslationClient | string, options: TranslationServiceOptions) {
-    if (typeof client === 'string') {
-      this.client = new TranslationClient(client);
-    } else {
-      this.client = client;
-    }
-
-    this.options = options;
-
-    // Configure cross-tab options
-    const crossTabOptions: Partial<CrossTabOptions> = {
-      enabled: options.crossTab === true,
-    };
-    if (options.crossTabChannelName) {
-      crossTabOptions.channelName = options.crossTabChannelName;
-    }
-    if (options.crossTabStorageKeyPrefix) {
-      crossTabOptions.storageKeyPrefix = options.crossTabStorageKeyPrefix;
-    }
-
-    // Create internal translation pool
-    this.pool = new TranslationPool(this.client, options.senseId, crossTabOptions);
-    
-    // Set initial fingerprint if provided
-    if (options.fingerprint) {
-      this.pool['currentFingerprint'] = options.fingerprint;
-    }
-  }
-
-  /**
-   * Ensure the service is initialized (lazy initialization)
-   * Called automatically by translate() if needed
-   */
-  private async ensureInitialized(): Promise<void> {
-    if (this.initialized && !this.pool.isLoading()) {
-      return;
-    }
-
-    // Use singleton pattern for initialization promise
-    if (!this.initPromise) {
-      this.initPromise = this.doInitialize();
-    }
-
-    await this.initPromise;
-  }
-
-  /**
-   * Actual initialization logic
-   */
-  private async doInitialize(): Promise<void> {
-    // Initialize the pool (loads translations via streaming)
-    await this.pool.initialize();
-    this.initialized = true;
-  }
-
-  /**
-   * Initialize the translation service - loads all translations from backend
-   * 
-   * This is optional - translate() will automatically initialize if needed.
-   * Call this explicitly if you want to preload all translations upfront.
-   * 
-   * Automatically handles cross-tab synchronization if enabled.
-   */
-  async initialize(): Promise<void> {
-    await this.ensureInitialized();
-  }
-
-  /**
-   * Check if service has been initialized
-   */
-  isInitialized(): boolean {
-    return this.initialized;
-  }
-
-  /**
-   * Switch to a different fingerprint (for personalized/custom translations)
-   * Automatically loads all translations for this fingerprint
-   * @param fingerprint - The fingerprint to switch to
-   */
-  async switchFingerprint(fingerprint: string): Promise<void> {
-    // Reset initialization state
-    this.initialized = false;
-    this.initPromise = null;
-    
-    await this.pool.switchFingerprint(fingerprint);
-    this.initialized = true;
-  }
-
-  /**
-   * Clear the current fingerprint - frees memory
-   */
-  clearCurrentFingerprint(): void {
-    this.pool.clearCurrentFingerprint();
-  }
-
-  /**
-   * Get all available translations for a semantic sense
-   * @param senseId - Semantic sense ID
-   * @param fingerprint - Optional special fingerprint for personalized translations
-   * If not provided, uses the fingerprint configured at service initialization
-   * @returns Promise resolving to list of available translation strings
-   */
-  async getSenseTranslations(senseId: string, fingerprint?: string): Promise<string[]> {
-    const response = await this.client.getSenseTranslate({
-      senseId,
-      fingerprint,
-      page: 1,
-      pageSize: 1000
-    });
-    
-    const translations: string[] = [];
-    response.result.forEach(record => {
-      if (record.translate && record.translate.trim()) {
-        translations.push(record.translate);
-      }
-    });
-    
-    return translations;
-  }
-
-  /**
-   * Add a custom translation to the current pool
-   * @param text - Original text
-   * @param translation - Translated text
-   */
-  addCustomTranslation(text: string, translation: string): void {
-    this.pool.addTranslation(text, translation);
-  }
-
-  /**
-   * Lookup translation in cache
-   * Note: If not initialized, will return not found
-   * @param text - Text to lookup
-   * @returns Lookup result with found flag and translation if available
-   */
-  lookup(text: string): TranslationLookupResult {
-    return this.pool.lookup(text);
-  }
-
-  /**
-   * Translate text with automatic caching
-   * 
-   * Features:
-   * - Lazy initialization: automatically initializes on first call
-   * - Checks cache first
-   * - If not found in cache, requests from backend and caches result
-   * 
-   * @param text - Text to translate
-   * @param toLang - Target language (2-letter code)
-   * @param fromLang - Optional source language (2-letter code)
-   * @param provider - Optional translation provider name
-   * @returns Translation response
-   */
-  async translate(
-    text: string,
-    toLang?: string,
-    fromLang?: string,
-    provider?: string
-  ): Promise<LLMTranslateResponse> {
-    // Lazy initialization - ensure initialized before checking cache
-    await this.ensureInitialized();
-
-    // Use configured languages from options if not provided as arguments
-    const finalToLang = toLang ?? this.options.toLang;
-    const finalFromLang = fromLang ?? this.options.fromLang;
-
-    // Check cache first
-    const lookupResult = this.lookup(text);
-    if (lookupResult.found) {
-      return {
-        originalText: text,
-        translatedText: lookupResult.translation,
-        provider: 'cache',
-        timestamp: Date.now(),
-        finished: true,
-        cached: true,
-        fromLang: finalFromLang,
-        toLang: finalToLang,
-      };
-    }
-
-    // Not in cache, request from backend
-    const senseId = this.getSenseId();
-    const response = await this.client.llmTranslate({
-      text,
-      toLang: finalToLang!,
-      fromLang: finalFromLang,
-      provider,
-      senseId,
-    });
-
-    // Add to cache automatically
-    if (response.translatedText) {
-      this.pool.addTranslation(text, response.translatedText);
-    }
-
-    return response;
-  }
-
-  /**
-   * Direct translation - bypasses cache and always requests from backend
-   * Use this for one-off translations when you don't need caching
-   * 
-   * @param text - Text to translate
-   * @param toLang - Target language (2-letter code)
-   * @param fromLang - Optional source language (2-letter code)
-   * @param provider - Optional translation provider name
-   * @returns Translation response
-   */
-  async translateDirect(
-    text: string,
-    toLang?: string,
-    fromLang?: string,
-    provider?: string
-  ): Promise<LLMTranslateResponse> {
-    const senseId = this.getSenseId();
-    // Use configured languages from options if not provided as arguments
-    const finalToLang = toLang ?? this.options.toLang;
-    const finalFromLang = fromLang ?? this.options.fromLang;
-    return this.client.llmTranslate({
-      text,
-      toLang: finalToLang!,
-      fromLang: finalFromLang,
-      provider,
-      senseId,
-    });
-  }
-
-  /**
-   * Stream translations from backend in batches
-   * Used for bulk loading all translations in a sense
-   * 
-   * @param request - Stream request parameters
-   * @param onBatch - Callback for each batch received
-   */
-  async streamTranslate(
-    request: TranslateStreamRequest,
-    onBatch: (response: TranslateStreamResponse) => boolean | void
-  ): Promise<void> {
-    await this.client.translateStream(request, onBatch);
-  }
-
-  /**
-   * Get the sense ID this service is connected to
-   */
-  getSenseId(): string {
-    return (this.pool as any).senseId;
-  }
-
-  /**
-   * Clear all cached data to free memory
-   */
-  clearAll(): void {
-    this.pool.clearAll();
-  }
-
-  /**
-   * Destroy the service, close connections and free resources
-   * Should be called when the service is no longer needed
-   */
-  destroy(): void {
-    this.pool.destroy();
-    this.client.destroy();
-    this.initialized = false;
-    this.initPromise = null;
-  }
-}
+*/
 
 /**
  * Simple LRU Cache implementation for TranslationClient
@@ -1069,46 +831,103 @@ interface ClientCrossTabMessage {
   data?: LLMTranslateResponse;
 }
 
+export interface TranslationClientConfig {
+  /** JWT authentication token */
+  token: string;
+  /** Translation sense ID */
+  senseId: string;
+  /** API base URL (optional, defaults to https://api.hottol.com/laker/) */
+  baseUrl?: string;
+  /** Request timeout in milliseconds (optional, defaults to 30000) */
+  timeout?: number;
+  /** LRU cache size (optional, defaults to 1000, set to 0 to disable cache) */
+  cacheSize?: number;
+  /** Initial fingerprint for personalized translations (optional) */
+  fingerprint?: string;
+  /** Enable cross-tab cache synchronization (optional, default: false) */
+  crossTab?: boolean;
+  /** Custom cross-tab channel name (optional) */
+  crossTabChannelName?: string;
+  /** Custom cross-tab storage key prefix (optional) */
+  crossTabStorageKeyPrefix?: string;
+  /** Enable cache (optional, default: true, set false to disable all caching) */
+  useCache?: boolean;
+}
+
 /**
- * TranslationClient - Low-level gRPC-Web compatible client for TranslationService
- * Uses JSON over HTTP transport for compatibility
- * Includes LRU cache with optional Broadcast Channel + localStorage synchronization
+ * TranslationClient - Main entry point for Laker Translation SDK
+ * 
+ * Features:
+ * - Automatic cache lookup: preloaded translations → LRU cache → backend request
+ * - Fingerprint-based personalized translations support
+ * - Optional cross-browser-tab cache synchronization
+ * - Lazy initialization: automatically preloads on first use
+ * - Simple single-level API, no complex layering
  */
 export class TranslationClient {
   private baseUrl: string;
   private token: string;
   private timeout: number;
-  private cache: LRUCache<string, LLMTranslateResponse>;
-  private cacheEnabled: boolean;
-  private crossTabOptions: ClientCrossTabOptions;
+  private config: TranslationClientConfig;
+  
+  // LRU cache for LLM translations
+  private llmCacheEnabled: boolean;
+  private llmCache: LRUCache<string, LLMTranslateResponse>;
+  
+  // Translation pool for pre-loaded translations (fingerprint support)
+  private pool: TranslationPool;
+  private currentFingerprint: string | null = null;
+  private initialized: boolean = false;
+  private initPromise: Promise<void> | null = null;
+
+  // Cross-tab for LLM cache
   private broadcastChannel: BroadcastChannel | null = null;
+  private crossTabOptions: ClientCrossTabOptions;
   private storageKey: string;
 
   /**
-   * Create a new TranslationClient
-   * @param baseUrl Base URL of the gRPC-Web endpoint, defaults to https://api.hottol.com/laker/
-   * @param token JWT authentication token (optional)
-   * @param timeout Request timeout in milliseconds (default: 30000)
-   * @param cacheSize LRU cache size (default: 1000, set to 0 to disable cache)
-   * @param crossTabOptions Cross-tab synchronization options (default: disabled)
+   * Create a new TranslationClient - the only entry point you need
+   * @param config Client configuration
    */
-  constructor(
-    baseUrl: string = 'https://api.hottol.com/laker/',
-    token: string = '',
-    timeout: number = 30000,
-    cacheSize: number = 1000,
-    crossTabOptions?: Partial<ClientCrossTabOptions>
-  ) {
-    this.baseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
-    this.token = token;
-    this.timeout = timeout;
-    this.cacheEnabled = cacheSize > 0;
-    this.cache = new LRUCache<string, LLMTranslateResponse>(cacheSize);
-    this.crossTabOptions = { ...defaultClientCrossTabOptions, ...crossTabOptions };
+  constructor(config: TranslationClientConfig) {
+    this.config = config;
+    this.token = config.token;
+    this.baseUrl = (config.baseUrl || 'https://api.hottol.com/laker/').endsWith('/') 
+      ? (config.baseUrl || 'https://api.hottol.com/laker/').slice(0, -1) 
+      : (config.baseUrl || 'https://api.hottol.com/laker/');
+    this.timeout = config.timeout || 30000;
+    
+    // Configure LRU cache for LLM translations
+    this.llmCacheEnabled = config.useCache !== false;
+    const llmCacheSize = this.llmCacheEnabled ? (config.cacheSize || 1000) : 0;
+    this.llmCache = new LRUCache<string, LLMTranslateResponse>(llmCacheSize);
+    
+    // Configure cross-tab options for translation pool
+    const crossTabOptions: Partial<CrossTabOptions> = {
+      enabled: config.crossTab === true,
+    };
+    if (config.crossTabChannelName) {
+      crossTabOptions.channelName = config.crossTabChannelName;
+    }
+    if (config.crossTabStorageKeyPrefix) {
+      crossTabOptions.storageKeyPrefix = config.crossTabStorageKeyPrefix;
+    }
+    
+    // Create translation pool for pre-loaded translations
+    this.pool = new TranslationPool(this, config.senseId, crossTabOptions);
+    
+    // Set initial fingerprint if provided
+    if (config.fingerprint) {
+      this.currentFingerprint = config.fingerprint;
+      this.pool['currentFingerprint'] = config.fingerprint;
+    }
+    
+    // Cross-tab for LLM cache
+    this.crossTabOptions = { ...defaultClientCrossTabOptions };
     this.storageKey = this.crossTabOptions.storageKey!;
 
     // Initialize cross-tab synchronization if enabled
-    if (this.crossTabOptions.enabled && typeof BroadcastChannel !== 'undefined') {
+    if (config.crossTab && typeof BroadcastChannel !== 'undefined') {
       this.initCrossTabSync();
     }
 
@@ -1126,15 +945,15 @@ export class TranslationClient {
       const message = event.data;
 
       switch (message.type) {
-        case 'cache_update':
-          if (message.key && message.data) {
-            // Update local cache from another tab's update
-            this.cache.set(message.key, message.data);
-          }
-          break;
-        case 'cache_clear':
-          this.cache.clear();
-          break;
+     case 'cache_update':
+           if (message.key && message.data) {
+             // Update local cache from another tab's update
+             this.llmCache.set(message.key, message.data);
+           }
+           break;
+         case 'cache_clear':
+           this.llmCache.clear();
+           break;
         case 'request_sync':
           // Another tab is requesting our cache, send our data
           this.broadcastFullCache();
@@ -1154,17 +973,17 @@ export class TranslationClient {
       return;
     }
 
-    try {
-      const stored = localStorage.getItem(this.storageKey);
-      if (stored) {
-        const data = JSON.parse(stored) as Array<{ key: string; value: LLMTranslateResponse }>;
-        data.forEach(({ key, value }) => {
-          this.cache.set(key, value);
-        });
-      }
-    } catch (e) {
-      console.warn('Failed to load translation cache from localStorage:', e);
-    }
+     try {
+       const stored = localStorage.getItem(this.storageKey);
+       if (stored) {
+         const data = JSON.parse(stored) as Array<{ key: string; value: LLMTranslateResponse }>;
+         data.forEach(({ key, value }) => {
+           this.llmCache.set(key, value);
+         });
+       }
+     } catch (e) {
+       console.warn('Failed to load translation cache from localStorage:', e);
+     }
   }
 
   /**
@@ -1186,10 +1005,10 @@ export class TranslationClient {
   /**
    * Get all cache entries for storage/broadcast
    */
-  private getAllCacheEntries(): Array<{ key: string; value: LLMTranslateResponse }> {
+   private getAllCacheEntries(): Array<{ key: string; value: LLMTranslateResponse }> {
     const result: Array<{ key: string; value: LLMTranslateResponse }> = [];
     // Access internal cache map for iteration
-    const cacheMap = (this.cache as any).cache as Map<string, LLMTranslateResponse>;
+    const cacheMap = (this.llmCache as any).cache as Map<string, LLMTranslateResponse>;
     cacheMap.forEach((value, key) => {
       result.push({ key, value });
     });
@@ -1240,18 +1059,18 @@ export class TranslationClient {
   }
 
   /**
-   * Enable or disable cache
+   * Enable or disable LLM cache
    * @param enabled Whether to enable cache
    */
   setCacheEnabled(enabled: boolean): void {
-    this.cacheEnabled = enabled;
+    this.llmCacheEnabled = enabled;
   }
 
   /**
-   * Clear the translation cache (also clears localStorage and broadcasts to other tabs)
+   * Clear the LLM translation cache (also clears localStorage and broadcasts to other tabs)
    */
   clearCache(): void {
-    this.cache.clear();
+    this.llmCache.clear();
 
     // Clear localStorage
     if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
@@ -1265,10 +1084,10 @@ export class TranslationClient {
   }
 
   /**
-   * Get current cache size
+   * Get current LLM cache size
    */
   getCacheSize(): number {
-    return this.cache.size;
+    return this.llmCache.size;
   }
 
   /**
@@ -1276,16 +1095,6 @@ export class TranslationClient {
    */
   isCrossTabEnabled(): boolean {
     return this.crossTabOptions.enabled;
-  }
-
-  /**
-   * Destroy the client, close broadcast channel and free resources
-   */
-  destroy(): void {
-    if (this.broadcastChannel) {
-      this.broadcastChannel.close();
-      this.broadcastChannel = null;
-    }
   }
 
   /**
@@ -1373,28 +1182,278 @@ export class TranslationClient {
     const cacheKey = generateCacheKey(request);
 
     // Check cache first
-    if (this.cacheEnabled && !skipCache) {
-      const cached = this.cache.get(cacheKey);
+    if (this.llmCacheEnabled && !skipCache) {
+      const cached = this.llmCache.get(cacheKey);
       if (cached) {
         // Return cached response with cached flag set
         return { ...cached, cached: true };
       }
     }
 
-    // Request from backend
-    const url = `${this.baseUrl}/TranslationService/LLMTranslate`;
-    const response = await this.fetchJson(url, request) as LLMTranslateResponse;
+    // Request from backend using gRPC-web streaming LLMTranslateStream
+    let finalResponse: LLMTranslateResponse | null = null;
+
+    await this.llmTranslateStream(request, (response) => {
+      finalResponse = response;
+      // Continue until finished
+      return !response.finished;
+    });
+
+    if (!finalResponse) {
+      throw new Error('No response received from streaming translation');
+    }
 
     // Cache the response
-    if (this.cacheEnabled && response.translatedText) {
-      const cachedResponse = { ...response, cached: true };
-      this.cache.set(cacheKey, cachedResponse);
+    if (this.llmCacheEnabled && finalResponse.translatedText) {
+      const cachedResponse = { ...finalResponse, cached: true };
+      this.llmCache.set(cacheKey, cachedResponse);
       
       // Broadcast to other tabs and save to localStorage
       this.broadcastCacheUpdate(cacheKey, cachedResponse);
     }
 
-    return { ...response, cached: false };
+    return { ...finalResponse, cached: false };
+  }
+
+  // ========== High-level translation API ==========
+
+  /**
+   * Translate text - this is the main method you need
+   *
+   * Workflow:
+   * 1. Check pre-loaded translation pool (provided fingerprint → current fingerprint → common)
+   * 2. If found, return immediately from cache
+   * 3. If not found, request LLM translation from backend
+   * 4. Auto-initialize on first call
+   *
+   * @param text Text to translate
+   * @param toLang Target language
+   * @param fromLang Source language (optional, auto-detected if not provided)
+   * @param fingerprint Optional specific fingerprint for this translation (overrides client-level fingerprint)
+   * @returns Translated text
+   */
+  async translate(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<string> {
+    const response = await this.translateWithDetails(text, toLang, fromLang, fingerprint);
+    return response.translatedText;
+  }
+
+  /**
+   * Translate text with full response details
+   * @param text Text to translate
+   * @param toLang Target language
+   * @param fromLang Source language (optional)
+   * @param fingerprint Optional specific fingerprint for this translation (overrides client-level fingerprint)
+   * @returns Full translation response
+   */
+  async translateWithDetails(
+    text: string,
+    toLang: string,
+    fromLang?: string,
+    fingerprint?: string
+  ): Promise<LLMTranslateResponse> {
+    // Auto-initialize if not initialized yet
+    if (!this.initialized && !this.initPromise) {
+      this.initPromise = this.initialize();
+    }
+    
+    // Wait for initialization to complete
+    if (this.initPromise) {
+      await this.initPromise;
+      this.initPromise = null;
+      this.initialized = true;
+    }
+
+    // If specific fingerprint provided and not loaded yet, load it first
+    if (fingerprint && !this.pool.isLoaded(fingerprint)) {
+      await this.pool.loadFingerprintIfNotLoaded(fingerprint);
+    }
+
+    // Check pre-loaded translation pool first
+    const lookup = this.pool.lookup(text, fingerprint);
+    if (lookup.found) {
+      return {
+        originalText: text,
+        translatedText: lookup.translation,
+        provider: 'preloaded',
+        timestamp: Date.now(),
+        finished: true,
+        cached: true,
+        fromLang,
+        toLang
+      };
+    }
+
+    // Not found in pool, request LLM translation
+    return this.llmTranslate({
+      text,
+      fromLang,
+      toLang,
+      senseId: this.config.senseId,
+      fingerprint
+    });
+  }
+
+  /**
+   * Translate without using cache (always request from backend)
+   * @param text Text to translate
+   * @param toLang Target language
+   * @param fromLang Source language (optional)
+   * @param fingerprint Optional specific fingerprint for this translation
+   * @returns Translated text
+   */
+  async translateNoCache(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<string> {
+    const response = await this.llmTranslate({
+      text,
+      fromLang,
+      toLang,
+      senseId: this.config.senseId,
+      fingerprint
+    }, true);
+    return response.translatedText;
+  }
+
+  /**
+   * Batch translate multiple texts
+   * @param texts Array of texts to translate
+   * @param toLang Target language
+   * @param fromLang Source language (optional)
+   * @param fingerprint Optional specific fingerprint for all translations in this batch
+   * @returns Array of translated texts in same order
+   */
+  async translateBatch(
+    texts: string[],
+    toLang: string,
+    fromLang?: string,
+    fingerprint?: string
+  ): Promise<string[]> {
+    const results = await Promise.all(
+      texts.map(text => this.translate(text, toLang, fromLang, fingerprint))
+    );
+    return results;
+  }
+
+  /**
+   * Initialize and preload all translations
+   * Call this to warm up cache before translating
+   */
+  async preload(): Promise<void> {
+    if (!this.initialized && !this.initPromise) {
+      this.initPromise = this.initialize();
+      await this.initPromise;
+      this.initPromise = null;
+      this.initialized = true;
+    }
+  }
+
+  /**
+   * Internal initialization - preloads translations via streaming
+   */
+  private async initialize(): Promise<void> {
+    if (this.llmCacheEnabled) {
+      await this.pool.initialize();
+    }
+  }
+
+  /**
+   * Check if service is initialized
+   */
+  isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  // ========== Fingerprint management ==========
+
+  /**
+   * Set or change the current fingerprint
+   * Automatically loads special translations for this fingerprint
+   * @param fingerprint The fingerprint to use
+   */
+  async setFingerprint(fingerprint: string): Promise<void> {
+    if (this.currentFingerprint === fingerprint) {
+      return;
+    }
+    
+    this.currentFingerprint = fingerprint;
+    await this.pool.switchFingerprint(fingerprint);
+  }
+
+  /**
+   * Clear the current fingerprint
+   * Falls back to common translations
+   */
+  clearFingerprint(): void {
+    this.currentFingerprint = null;
+    this.pool.clearCurrentFingerprint();
+  }
+
+  /**
+   * Get the current fingerprint
+   */
+  getFingerprint(): string | null {
+    return this.currentFingerprint;
+  }
+
+  // ========== Cache management ==========
+
+  /**
+   * Check if cache is enabled
+   * @returns true if cache is enabled
+   */
+  isCacheEnabled(): boolean {
+    return this.llmCacheEnabled;
+  }
+
+  /**
+   * Check if a translation exists in pre-loaded pool
+   * @param text Text to check
+   * @param fingerprint Optional specific fingerprint to check
+   * @returns true if translation exists in cache
+   */
+  hasTranslation(text: string, fingerprint?: string): boolean {
+    return this.pool.lookup(text, fingerprint).found;
+  }
+
+  /**
+   * Get translation from pre-loaded cache without requesting from backend
+   * @param text Text to look up
+   * @param fingerprint Optional specific fingerprint to look up
+   * @returns Translation if found, null otherwise
+   */
+  getCached(text: string, fingerprint?: string): string | null {
+    const result = this.pool.lookup(text, fingerprint);
+    return result.found ? result.translation : null;
+  }
+
+  /**
+   * Add a custom translation to the pre-loaded pool
+   * @param text Original text
+   * @param translation Translated text
+   * @param fingerprint Optional specific fingerprint to add to
+   */
+  addTranslation(text: string, translation: string, fingerprint?: string): void {
+    if (this.llmCacheEnabled) {
+      this.pool.addTranslation(text, translation, fingerprint);
+    }
+  }
+
+  /**
+   * Clear all cached translations
+   */
+  clearAllCache(): void {
+    this.pool.clearAll();
+    this.clearCache(); // Clear LLM cache too
+  }
+
+  /**
+   * Destroy the instance and free resources
+   * Call this when the instance is no longer needed
+   */
+  destroy(): void {
+    this.pool.destroy();
+    if (this.broadcastChannel) {
+      this.broadcastChannel.close();
+      this.broadcastChannel = null;
+    }
   }
 
   /**
@@ -1406,8 +1465,7 @@ export class TranslationClient {
   async llmTranslateStream(
     request: LLMTranslateRequest,
     onResponse: (response: LLMTranslateResponse) => boolean | void
-  ): Promise<void> {
-    const url = `${this.baseUrl}/TranslationService/LLMTranslateStream`;
+  ): Promise<void> {const url = `${this.baseUrl}/TranslationService/LLMTranslateStream`;
     
     const response = await this.fetchWithTimeout(url, {
       method: 'POST',
@@ -1415,34 +1473,94 @@ export class TranslationClient {
       headers: this.getHeaders()
     });
     
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`HTTP ${response.status}: ${text}`);
+    }
+    
     if (!response.body) {
       throw new Error('No response body for streaming request');
     }
     
-    const reader = response.body.getReader();
     const decoder = new TextDecoder();
     
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      
-      const chunk = decoder.decode(value);
-      const lines = chunk.split('\n').filter(line => line.trim().length > 0);
-      
-      for (const line of lines) {
-        try {
-          const data = JSON.parse(line);
-          const shouldContinue = onResponse(data as LLMTranslateResponse);
-          if (shouldContinue === false) {
-            reader.cancel();
-            return;
+    // Handle both browser ReadableStream and Node.js stream from node-fetch
+    // Check for Node.js stream first (node-fetch v2 uses Node.js streams)
+    if ('on' in response.body && typeof (response.body as any).on === 'function') {
+      // Node.js Stream (for testing)
+      await new Promise<void>((resolve, reject) => {
+        let buffer = '';
+        (response.body as any).on('data', (chunk: any) => {
+          buffer += chunk.toString();
+          const lines = buffer.split('\n').filter(line => line.trim().length > 0);
+          
+          // Keep incomplete line in buffer
+          if (!buffer.endsWith('\n')) {
+            buffer = lines.pop() || '';
+          } else {
+            buffer = '';
           }
-        } catch (e) {
-          console.warn('Failed to parse streaming chunk:', line, e);
+          
+          for (const line of lines) {
+            try {
+              const data = JSON.parse(line);
+              const shouldContinue = onResponse(data as LLMTranslateResponse);
+              if (shouldContinue === false) {
+                (response.body as any).destroy();
+                resolve();
+                return;
+              }
+            } catch (e) {
+              console.warn('Failed to parse streaming chunk:', line, e);
+            }
+          }
+        });
+        
+        (response.body as any).on('end', () => {
+          // Process any remaining data
+          if (buffer.trim().length > 0) {
+            try {
+              const data = JSON.parse(buffer.trim());
+              onResponse(data as LLMTranslateResponse);
+            } catch (e) {
+              console.warn('Failed to parse final chunk:', buffer, e);
+            }
+          }
+          resolve();
+        });
+        
+        (response.body as any).on('error', (err: Error) => {
+          reject(err);
+        });
+      });
+    } else if ('getReader' in response.body && typeof (response.body as any).getReader === 'function') {
+      // Browser ReadableStream (whatwg streams)
+      const reader = (response.body as any).getReader();
+      
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n').filter(line => line.trim().length > 0);
+        
+        for (const line of lines) {
+          try {
+            const data = JSON.parse(line);
+            const shouldContinue = onResponse(data as LLMTranslateResponse);
+            if (shouldContinue === false) {
+              reader.cancel();
+              return;
+            }
+          } catch (e) {
+            console.warn('Failed to parse streaming chunk:', line, e);
+          }
         }
       }
+    } else {
+      throw new Error('Unsupported response body type');
     }
   }
 
@@ -1485,293 +1603,58 @@ export class TranslationClient {
     clearTimeout(id);
     return response;
   }
-}
-
-/**
- * AppTranslation - Application-level translation interface
- * Single entry point for all translation needs with automatic initialization,
- * intelligent caching, and on-demand loading.
- * 
- * Features:
- * - Single entry point: just provide token and senseId
- * - Automatic streaming batch initialization
- * - On-demand loading when fingerprint changes
- * - Intelligent translation with cache-first strategy
- * - Cross-tab synchronization support
- * 
- * Usage:
- * ```typescript
- * // Create instance
- * const appTranslate = new AppTranslation({
- *   token: 'your-jwt-token',
- *   senseId: 'your-sense-id',
- *   baseUrl: 'https://api.laker.dev'
- * });
- * 
- * // Simple translation - auto-initializes
- * const result = await appTranslate.translate('Hello', 'zh');
- * 
- * // Switch fingerprint - auto-loads special translations
- * await appTranslate.setFingerprint('user-123');
- * 
- * // Destroy when done
- * appTranslate.destroy();
- * ```
- */
-export class AppTranslation {
-  private client: TranslationClient;
-  private service: TranslationService;
-  private config: AppTranslationConfig;
-  private currentFingerprint: string | null = null;
-  private useCache: boolean;
 
   /**
-   * Create a new AppTranslation instance
-   * @param config Configuration options
+   * Get cache statistics for both pre-loaded translations and LLM translations
+   * @returns Human-readable cache statistics string
    */
-  constructor(config: AppTranslationConfig) {
-    this.config = config;
-    // Default to using cache unless explicitly disabled
-    this.useCache = config.useCache !== false;
-    
-    // If cache is disabled, set cacheSize to 0
-    const cacheSize = this.useCache ? (config.cacheSize || 1000) : 0;
-    
-    this.client = new TranslationClient(
-      config.baseUrl || 'https://api.hottol.com/laker/',
-      config.token,
-      config.timeout || 30000,
-      cacheSize,
-      { enabled: config.crossTab ?? false }
-    );
-    
-    this.service = new TranslationService(this.client, {
-      senseId: config.senseId,
-      fingerprint: config.fingerprint,
-      crossTab: config.crossTab ?? false
+  getStats(): string {
+    let preloadedCount = 0;
+    const fingerprintCount: string[] = [];
+    // Use type assertion to access private pools property
+    const pools = (this.pool as any).pools as Map<string, Map<string, string>>;
+    pools.forEach((cache, fp) => {
+      const count = cache.size;
+      preloadedCount += count;
+      fingerprintCount.push(`${fp}: ${count}`);
     });
-    
-    if (config.fingerprint) {
-      this.currentFingerprint = config.fingerprint;
-    }
-  }
 
-  /**
-   * Update the authentication token
-   * @param token New JWT token
-   */
-  setToken(token: string): void {
-    this.client.setToken(token);
-  }
+    const llmCount = this.llmCache.size;
+    const llmEnabled = this.llmCacheEnabled;
 
-  /**
-   * Set or change the current fingerprint
-   * Automatically loads special translations for this fingerprint
-   * @param fingerprint The fingerprint to use
-   */
-  async setFingerprint(fingerprint: string): Promise<void> {
-    if (this.currentFingerprint === fingerprint) {
-      return;
-    }
-    
-    this.currentFingerprint = fingerprint;
-    await this.service.switchFingerprint(fingerprint);
-  }
-
-  /**
-   * Clear the current fingerprint
-   * Falls back to common translations
-   */
-  clearFingerprint(): void {
-    this.currentFingerprint = null;
-    this.service.clearCurrentFingerprint();
-  }
-
-  /**
-   * Get the current fingerprint
-   */
-  getFingerprint(): string | null {
-    return this.currentFingerprint;
-  }
-
-  /**
-   * Translate text with automatic caching and initialization
-   * 
-   * - First call initializes the service automatically
-   * - Checks cache first (fingerprint-specific → common)
-   * - Falls back to LLM translation if not found
-   * - Caches result automatically (unless useCache: false)
-   * 
-   * @param text Text to translate
-   * @param toLang Target language code (e.g., 'zh', 'en')
-   * @param fromLang Optional source language code (auto-detected if not provided)
-   * @returns Translation result
-   */
-  async translate(text: string, toLang: string, fromLang?: string): Promise<string> {
-    const response = await this.service.translate(text, toLang, fromLang);
-    return response.translatedText;
-  }
-
-  /**
-   * Translate text with full response details
-   * @param text Text to translate
-   * @param toLang Target language code
-   * @param fromLang Optional source language code
-   * @returns Full translation response
-   */
-  async translateWithDetails(
-    text: string, 
-    toLang: string, 
-    fromLang?: string
-  ): Promise<LLMTranslateResponse> {
-    return this.service.translate(text, toLang, fromLang);
-  }
-
-  /**
-   * Translate text without using cache (always request from backend)
-   * @param text Text to translate
-   * @param toLang Target language code
-   * @param fromLang Optional source language code
-   * @returns Translation result
-   */
-  async translateNoCache(text: string, toLang: string, fromLang?: string): Promise<string> {
-    const response = await this.service.translateDirect(text, toLang, fromLang);
-    return response.translatedText;
-  }
-
-  /**
-   * Batch translate multiple texts
-   * @param texts Array of texts to translate
-   * @param toLang Target language code
-   * @param fromLang Optional source language code
-   * @returns Array of translated texts in same order
-   */
-  async translateBatch(
-    texts: string[], 
-    toLang: string, 
-    fromLang?: string
-  ): Promise<string[]> {
-    const results = await Promise.all(
-      texts.map(text => this.translate(text, toLang, fromLang))
-    );
-    return results;
-  }
-
-  /**
-   * Check if cache is enabled
-   * @returns true if cache is enabled
-   */
-  isCacheEnabled(): boolean {
-    return this.useCache;
-  }
-
-  /**
-   * Check if a translation exists in cache
-   * @param text Text to check
-   * @returns true if translation exists in cache
-   */
-  hasTranslation(text: string): boolean {
-    if (!this.useCache) {
-      return false;
-    }
-    return this.service.lookup(text).found;
-  }
-
-  /**
-   * Get translation from cache without requesting from backend
-   * @param text Text to look up
-   * @returns Translation if found, null otherwise
-   */
-  getCached(text: string): string | null {
-    if (!this.useCache) {
-      return null;
-    }
-    const result = this.service.lookup(text);
-    return result.found ? result.translation : null;
-  }
-
-  /**
-   * Add a custom translation to the cache
-   * @param text Original text
-   * @param translation Translated text
-   */
-  addTranslation(text: string, translation: string): void {
-    if (this.useCache) {
-      this.service.addCustomTranslation(text, translation);
-    }
-  }
-
-  /**
-   * Preload all translations for current context
-   * Call this to warm up the cache before translating
-   */
-  async preload(): Promise<void> {
-    if (this.useCache) {
-      await this.service.initialize();
-    }
-  }
-
-  /**
-   * Check if the service is initialized
-   */
-  isInitialized(): boolean {
-    return this.service.isInitialized();
-  }
-
-  /**
-   * Clear all cached translations
-   */
-  clearCache(): void {
-    this.service.clearAll();
-    this.client.clearCache();
-  }
-
-  /**
-   * Destroy the instance and free resources
-   * Call this when the instance is no longer needed
-   */
-  destroy(): void {
-    this.service.destroy();
+    return [
+      `Pre-loaded translations: ${preloadedCount} total`,
+      ...(fingerprintCount.length > 0 ? [`  Breakdown by fingerprint: ${fingerprintCount.join(', ')}`] : []),
+      `LLM translation cache: ${llmEnabled ? `${llmCount} entries` : 'disabled'}`
+    ].join('\n');
   }
 }
 
 /**
- * Configuration for AppTranslation
- */
-export interface AppTranslationConfig {
-  /** JWT authentication token */
-  token: string;
-  /** Translation sense ID */
-  senseId: string;
-  /** API base URL (optional, defaults to https://api.hottol.com/laker/) */
-  baseUrl?: string;
-  /** Request timeout in milliseconds (optional, defaults to 30000) */
-  timeout?: number;
-  /** LRU cache size (optional, defaults to 1000, set to 0 to disable cache) */
-  cacheSize?: number;
-  /** Initial fingerprint (optional) */
-  fingerprint?: string;
-  /** Enable cross-tab synchronization (optional, defaults to false) */
-  crossTab?: boolean;
-  /** Enable cache (optional, defaults to true. Set to false to disable all caching) */
-  useCache?: boolean;
-}
-
-/**
- * Create an AppTranslation instance with simplified configuration
+ * Create a TranslationClient instance with simplified configuration
  * @param token JWT authentication token
  * @param senseId Translation sense ID
  * @param options Additional options
- * @returns AppTranslation instance
+ * @returns TranslationClient instance
  */
 export function createTranslation(
   token: string, 
   senseId: string, 
-  options?: Partial<AppTranslationConfig>
-): AppTranslation {
-  return new AppTranslation({
+  options?: Partial<TranslationClientConfig>
+): TranslationClient {
+  return new TranslationClient({
     token,
     senseId,
     ...options
   });
-}export default createTranslation;
+}
+export default createTranslation;
+
+// Auto-export to global for browser usage
+if (typeof window !== 'undefined') {
+  (window as any).LakerTranslation = {
+    TranslationClient,
+    createTranslation,
+    default: createTranslation
+  };
+}
