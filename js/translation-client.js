@@ -109,6 +109,9 @@
             this.broadcastChannel = null;
             this.loading = false;
             this.loadedFingerprints = new Set();
+            // Observer pattern for queueing translation requests during load
+            this.queuedRequests = [];
+            this.pendingResolutions = {};
             this.client = client;
             this.senseId = senseId;
             this.crossTabOptions = Object.assign(Object.assign({}, defaultCrossTabOptions), crossTabOptions);
@@ -276,6 +279,122 @@
             this.broadcastUpdate();
         }
         /**
+         * Queue a translation request and return original text immediately
+         * This is used during pool loading when translations are not yet available
+         * @param request Translation request to queue
+         * @returns Original text as the initial response
+         */
+        queueTranslationRequest(request) {
+            // Return original text immediately for fast fallback
+            const initialResponse = {
+                originalText: request.text,
+                translatedText: request.text,
+                provider: 'fast_fallback',
+                timestamp: Date.now(),
+                finished: true,
+                cached: false,
+                fromLang: request.fromLang,
+                toLang: request.toLang
+            };
+            // Resolve immediately with original text
+            const promise = new Promise((resolve) => {
+                resolve(initialResponse);
+            });
+            // Queue the request for processing after pool loads
+            const queuedReq = Object.assign(Object.assign({}, request), { resolveFunction: (result) => {
+                    // Remove from pending resolutions
+                    delete this.pendingResolutions[`${request.text}-${request.fingerprint || 'common'}`];
+                    // Resolve the promise for all listeners
+                    queuedReq.resolveFunction(result);
+                }, rejectFunction: (error) => {
+                    delete this.pendingResolutions[`${request.text}-${request.fingerprint || 'common'}`];
+                    queuedReq.rejectFunction(error);
+                } });
+            this.queuedRequests.push(queuedReq);
+            // Store reference to allow later resolution
+            const key = `${request.text}-${request.fingerprint || 'common'}`;
+            this.pendingResolutions[key] = {
+                resolve: (result) => queuedReq.resolveFunction(result),
+                reject: (error) => queuedReq.rejectFunction(error)
+            };
+            // Return original text immediately
+            return promise;
+        }
+        /**
+         * Process all queued translation requests after pool is loaded
+         * This should be called when the pool is fully initialized
+         * Includes automatic retry mechanism for failed requests
+         */
+        processQueuedRequests() {
+            return __awaiter(this, arguments, void 0, function* (maxRetries = 3, retryDelayMs = 1000) {
+                if (this.queuedRequests.length === 0) {
+                    return;
+                }
+                console.log(`[TranslationPool] Processing ${this.queuedRequests.length} queued translation requests...`);
+                // Copy queued requests and clear the queue
+                const requestsToProcess = [...this.queuedRequests];
+                this.queuedRequests = [];
+                // Process each request with retry mechanism
+                const processWithRetry = (req_1, ...args_1) => __awaiter(this, [req_1, ...args_1], void 0, function* (req, attempt = 0) {
+                    try {
+                        // Check if translation is now available in pool
+                        const lookup = this.lookup(req.text, req.fingerprint);
+                        if (lookup.found) {
+                            // Translation is now available in pool, use it
+                            const translation = yield this.client.translate(req.text, req.toLang, req.fromLang, req.fingerprint);
+                            return { text: req.text, translation, success: true };
+                        }
+                        else {
+                            // Not in pool, request from backend
+                            const response = yield this.client.translateWithDetails(req.text, req.toLang, req.fromLang, req.fingerprint);
+                            return { text: req.text, translation: response.translatedText, success: true };
+                        }
+                    }
+                    catch (error) {
+                        console.warn(`[TranslationPool] Request failed (attempt ${attempt + 1}/${maxRetries}):`, error.message);
+                        if (attempt < maxRetries - 1) {
+                            // Wait before retry
+                            yield new Promise(resolve => setTimeout(resolve, retryDelayMs * (attempt + 1)));
+                            return processWithRetry(req, attempt + 1);
+                        }
+                        // All retries failed, return original text as fallback
+                        console.error(`[TranslationPool] All retries failed for: "${req.text}", using original text`);
+                        return { text: req.text, translation: req.text, success: false };
+                    }
+                });
+                // Process all requests in parallel
+                const promises = requestsToProcess.map(req => processWithRetry(req));
+                const results = yield Promise.all(promises);
+                // Add successful translations to pool
+                const successCount = results.filter(r => r.success).length;
+                const failCount = results.length - successCount;
+                results.forEach(({ text, translation }) => {
+                    this.addTranslation(text, translation);
+                });
+                // Broadcast updates to other tabs
+                this.broadcastUpdate();
+                console.log(`[TranslationPool] Completed processing ${results.length} queued requests (${successCount} success, ${failCount} failed)`);
+                // If there were failures, log them
+                if (failCount > 0) {
+                    console.warn(`[TranslationPool] ${failCount} requests failed after ${maxRetries} retries`);
+                }
+            });
+        }
+        /**
+         * Check if there are any pending queued requests
+         */
+        hasQueuedRequests() {
+            return this.queuedRequests.length > 0;
+        }
+        /**
+         * Clear all queued requests (should be called when pool is being cleared)
+         */
+        clearQueuedRequests() {
+            console.log(`Clearing ${this.queuedRequests.length} queued requests`);
+            this.queuedRequests = [];
+            this.pendingResolutions = {};
+        }
+        /**
          * Check if currently loading
          */
         isLoading() {
@@ -284,6 +403,7 @@
         /**
          * Initialize the pool - always loads common first, then loads current fingerprint if set
          * If fingerprint is set, loads special translations; common is always preloaded
+         * After loading, processes any queued translation requests
          */
         initialize() {
             return __awaiter(this, void 0, void 0, function* () {
@@ -292,16 +412,22 @@
                 }
                 this.loading = true;
                 try {
+                    console.log('[TranslationPool] Starting pool initialization...');
                     // Always preload common first (required)
                     if (!this.loadedFingerprints.has('common')) {
                         yield this.loadFingerprintTranslations('common', undefined);
+                        console.log('[TranslationPool] Common translations loaded');
                     }
                     // Then load current fingerprint if set and not loaded
                     if (this.currentFingerprint && !this.loadedFingerprints.has(this.currentFingerprint)) {
                         yield this.loadFingerprintTranslations(this.currentFingerprint, this.currentFingerprint);
+                        console.log(`[TranslationPool] ${this.currentFingerprint} translations loaded`);
                     }
                     // Broadcast to other tabs after full initialization
                     this.broadcastUpdate();
+                    console.log('[TranslationPool] Pool initialization completed');
+                    // Process queued requests after pool is loaded
+                    yield this.processQueuedRequests();
                 }
                 finally {
                     this.loading = false;
@@ -330,8 +456,9 @@
                     batchSize: 500
                 }, (response) => {
                     // Add all translations from this batch to the fingerprint's pool
-                    response.translations.forEach(record => {
-                        pool.set(record.text, record.translate);
+                    // response.translation is a Record<string, string> (key-value map)
+                    Object.entries(response.translation).forEach(([text, translate]) => {
+                        pool.set(text, translate);
                     });
                     return true; // Continue streaming
                 });
@@ -676,9 +803,10 @@
             this.broadcastChannel = null;
             this.config = config;
             this.token = config.token;
-            this.baseUrl = (config.baseUrl || 'https://api.hottol.com/laker/').endsWith('/')
-                ? (config.baseUrl || 'https://api.hottol.com/laker/').slice(0, -1)
-                : (config.baseUrl || 'https://api.hottol.com/laker/');
+            // Default baseUrl includes the API path prefix /api/v1/translate
+            this.baseUrl = (config.baseUrl || 'https://api.hottol.com/laker/api/v1/translate').endsWith('/')
+                ? (config.baseUrl || 'https://api.hottol.com/laker/api/v1/translate').slice(0, -1)
+                : (config.baseUrl || 'https://api.hottol.com/laker/api/v1/translate');
             this.timeout = config.timeout || 30000;
             // Configure LRU cache for LLM translations
             this.llmCacheEnabled = config.useCache !== false;
@@ -879,32 +1007,90 @@
                     body: JSON.stringify(request),
                     headers: this.getHeaders()
                 });
+                if (!response.ok) {
+                    const text = yield response.text();
+                    throw new Error(`HTTP ${response.status}: ${text}`);
+                }
                 if (!response.body) {
                     throw new Error('No response body for streaming request');
                 }
-                const reader = response.body.getReader();
                 const decoder = new TextDecoder();
-                while (true) {
-                    const { done, value } = yield reader.read();
-                    if (done) {
-                        break;
-                    }
-                    const chunk = decoder.decode(value);
-                    // Parse each line as a JSON message
-                    const lines = chunk.split('\n').filter(line => line.trim().length > 0);
-                    for (const line of lines) {
-                        try {
-                            const data = JSON.parse(line);
-                            const shouldContinue = onBatch(data);
-                            if (shouldContinue === false) {
-                                reader.cancel();
-                                return;
+                // Handle both browser ReadableStream and Node.js stream from node-fetch
+                // Check for Node.js stream first (node-fetch v2 uses Node.js streams)
+                if ('on' in response.body && typeof response.body.on === 'function') {
+                    // Node.js Stream (for testing)
+                    yield new Promise((resolve, reject) => {
+                        let buffer = '';
+                        response.body.on('data', (chunk) => {
+                            buffer += chunk.toString();
+                            const lines = buffer.split('\n').filter(line => line.trim().length > 0);
+                            // Keep incomplete line in buffer
+                            if (!buffer.endsWith('\n')) {
+                                buffer = lines.pop() || '';
+                            }
+                            else {
+                                buffer = '';
+                            }
+                            for (const line of lines) {
+                                try {
+                                    const data = JSON.parse(line);
+                                    const shouldContinue = onBatch(data);
+                                    if (shouldContinue === false) {
+                                        response.body.destroy();
+                                        resolve();
+                                        return;
+                                    }
+                                }
+                                catch (e) {
+                                    console.warn('Failed to parse streaming chunk:', line, e);
+                                }
+                            }
+                        });
+                        response.body.on('end', () => {
+                            // Process any remaining data
+                            if (buffer.trim().length > 0) {
+                                try {
+                                    const data = JSON.parse(buffer.trim());
+                                    onBatch(data);
+                                }
+                                catch (e) {
+                                    console.warn('Failed to parse final chunk:', buffer, e);
+                                }
+                            }
+                            resolve();
+                        });
+                        response.body.on('error', (err) => {
+                            reject(err);
+                        });
+                    });
+                }
+                else if ('getReader' in response.body && typeof response.body.getReader === 'function') {
+                    // Browser ReadableStream (whatwg streams)
+                    const reader = response.body.getReader();
+                    while (true) {
+                        const { done, value } = yield reader.read();
+                        if (done) {
+                            break;
+                        }
+                        const chunk = decoder.decode(value);
+                        const lines = chunk.split('\n').filter(line => line.trim().length > 0);
+                        for (const line of lines) {
+                            try {
+                                const data = JSON.parse(line);
+                                const shouldContinue = onBatch(data);
+                                if (shouldContinue === false) {
+                                    reader.cancel();
+                                    return;
+                                }
+                            }
+                            catch (e) {
+                                console.warn('Failed to parse streaming chunk:', line, e);
                             }
                         }
-                        catch (e) {
-                            console.warn('Failed to parse streaming chunk:', line, e);
-                        }
                     }
+                }
+                else {
+                    throw new Error('Unsupported response body stream type');
                 }
             });
         }
@@ -996,7 +1182,14 @@
                 if (!this.initialized && !this.initPromise) {
                     this.initPromise = this.initialize();
                 }
-                // Wait for initialization to complete
+                // Check if pool is currently loading
+                const isPoolLoading = this.pool.isLoading();
+                // If pool is loading, use observer pattern to queue request and return original immediately
+                if (isPoolLoading) {
+                    console.log(`[TranslationClient] Pool is loading, using fast fallback for: "${text}"`);
+                    return this.pool.queueTranslationRequest({ text, toLang, fromLang, fingerprint });
+                }
+                // Wait for initialization to complete if still in progress
                 if (this.initPromise) {
                     yield this.initPromise;
                     this.initPromise = null;
@@ -1020,13 +1213,38 @@
                         toLang
                     };
                 }
-                // Not found in pool, request LLM translation
-                return this.llmTranslate({
-                    text,
-                    fromLang,
-                    toLang,
-                    senseId: this.config.senseId,
-                    fingerprint
+                // Not found in pool - request from backend via TranslateStream
+                // This will automatically call LLM if translation doesn't exist in database
+                return new Promise((resolve, reject) => {
+                    this.translateStream({
+                        senseId: this.config.senseId,
+                        fingerprint,
+                        text,
+                        from_lang: fromLang,
+                        to_lang: toLang
+                    }, (response) => {
+                        // Check if we got a translation
+                        if (response.translation && response.translation[text]) {
+                            resolve({
+                                originalText: text,
+                                translatedText: response.translation[text],
+                                provider: 'translate-stream',
+                                timestamp: response.timestamp,
+                                finished: response.finished,
+                                cached: false,
+                                fromLang,
+                                toLang
+                            });
+                            return false; // Stop streaming
+                        }
+                        // Check for error
+                        if (response.translation && response.translation['error']) {
+                            reject(new Error(response.translation['error']));
+                            return false;
+                        }
+                        // Continue if not finished
+                        return !response.finished;
+                    }).catch(reject);
                 });
             });
         }
@@ -1040,14 +1258,26 @@
          */
         translateNoCache(text, toLang, fromLang, fingerprint) {
             return __awaiter(this, void 0, void 0, function* () {
-                const response = yield this.llmTranslate({
-                    text,
-                    fromLang,
-                    toLang,
-                    senseId: this.config.senseId,
-                    fingerprint
-                }, true);
-                return response.translatedText;
+                // Use TranslateStream which will automatically call LLM if needed
+                return new Promise((resolve, reject) => {
+                    this.translateStream({
+                        senseId: this.config.senseId,
+                        fingerprint,
+                        text,
+                        from_lang: fromLang,
+                        to_lang: toLang
+                    }, (response) => {
+                        if (response.translation && response.translation[text]) {
+                            resolve(response.translation[text]);
+                            return false;
+                        }
+                        if (response.translation && response.translation['error']) {
+                            reject(new Error(response.translation['error']));
+                            return false;
+                        }
+                        return !response.finished;
+                    }).catch(reject);
+                });
             });
         }
         /**
@@ -1166,6 +1396,7 @@
          */
         clearAllCache() {
             this.pool.clearAll();
+            this.pool.clearQueuedRequests(); // Clear waiting translation requests too
             this.clearCache(); // Clear LLM cache too
         }
         /**

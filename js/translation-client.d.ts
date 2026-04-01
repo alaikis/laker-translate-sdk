@@ -30,12 +30,16 @@ export interface TranslateStreamRequest {
     senseId: string;
     fingerprint?: string;
     batchSize?: number;
+    text?: string;
+    from_lang?: string;
+    to_lang?: string;
 }
 export interface TranslateStreamResponse {
-    batch: number;
-    hasMore: boolean;
-    total: number;
-    translations: TranslateRecord[];
+    original_text: string;
+    translation: Record<string, string>;
+    timestamp: number;
+    finished: boolean;
+    batch_index: number;
 }
 /**
  * Result of template extraction
