@@ -607,17 +607,40 @@
          */
         requestTranslation(text, fromLang, toLang) {
             return __awaiter(this, void 0, void 0, function* () {
-                const response = yield this.client.llmTranslate({
-                    text,
-                    fromLang,
-                    toLang,
-                    senseId: this.senseId
+                // Use translateStream API - backend will automatically call LLM if translation not found in database
+                return new Promise((resolve, reject) => {
+                    this.client.translateStream({
+                        senseId: this.senseId,
+                        text,
+                        from_lang: fromLang,
+                        to_lang: toLang
+                    }, (response) => {
+                        // Check if we got a translation
+                        if (response.translation && response.translation[text]) {
+                            const translatedText = response.translation[text];
+                            // Add to pool automatically
+                            this.addTranslation(text, translatedText);
+                            resolve({
+                                originalText: text,
+                                translatedText: translatedText,
+                                provider: 'translate-stream',
+                                timestamp: response.timestamp,
+                                finished: response.finished,
+                                cached: false,
+                                fromLang,
+                                toLang
+                            });
+                            return false; // Stop streaming
+                        }
+                        // Check for error
+                        if (response.translation && response.translation['error']) {
+                            reject(new Error(response.translation['error']));
+                            return false;
+                        }
+                        // Continue if not finished
+                        return !response.finished;
+                    }).catch(reject);
                 });
-                // Add to pool automatically
-                if (response.translatedText) {
-                    this.addTranslation(text, response.translatedText);
-                }
-                return response;
             });
         }
         /**
