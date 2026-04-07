@@ -1326,7 +1326,7 @@ export class TranslationClient {
    * @param request Request parameters
    */
   async getSenseTranslate(request: GetSenseTranslateRequest): Promise<GetSenseTranslateResponse> {
-    const url = `${this.baseUrl}/TranslationService/GetSenseTranslate`;
+    const url = `${this.baseUrl}/api/v1/translate/TranslationService/GetSenseTranslate`;
 
     const response = await this.fetchJson(url, request);
     return response as GetSenseTranslateResponse;
@@ -1341,7 +1341,7 @@ export class TranslationClient {
     request: TranslateStreamRequest,
     onBatch: (response: TranslateStreamResponse) => boolean | void
   ): Promise<void> {
-    const url = `${this.baseUrl}/TranslationService/TranslateStream`;
+    const url = `${this.baseUrl}/api/v1/translate/TranslationService/TranslateStream`;
     
     // For gRPC-Web streaming over HTTP, we use POST with streaming response
     const response = await this.fetchWithTimeout(url, {
@@ -1803,7 +1803,7 @@ export class TranslationClient {
   async llmTranslateStream(
     request: LLMTranslateRequest,
     onResponse: (response: LLMTranslateResponse) => boolean | void
-  ): Promise<void> {const url = `${this.baseUrl}/TranslationService/LLMTranslateStream`;
+  ): Promise<void> {const url = `${this.baseUrl}/api/v1/translate/TranslationService/LLMTranslateStream`;
     
     const response = await this.fetchWithTimeout(url, {
       method: 'POST',
@@ -1909,7 +1909,9 @@ export class TranslationClient {
     };
     
     if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+      // Use api-key-token header for API key authentication
+      // (not Bearer token which requires valid JWT)
+      headers['api-key-token'] = this.token;
     }
     
     return headers;
