@@ -5,6 +5,15 @@
  * Service: TranslationService
  * Source: proto/translation.proto
  */
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
 const defaultCrossTabOptions = {
     enabled: false,
     channelName: 'laker-translation-cache',
@@ -42,22 +51,33 @@ export function extractTemplate(text) {
     };
 }
 /**
- * TranslationPool - Multi-fingerprint translation cache with automatic common preloading
+ * TranslationPool - Multi-fingerprint, multi-language translation cache with automatic common preloading
  *
  * Architecture:
- * - pools: Map of fingerprint -> Map<text, translation> (each fingerprint has independent cache)
+ * - pools: Map of "fingerprint:toLang" -> Map<text, translation> (each fingerprint+language has independent cache)
  * - currentFingerprint: current active fingerprint for special translations
- * - common is always loaded and cached forever, never cleared unless full clear happens
+ * - currentToLang: current active target language
+ * - common translations are always loaded and cached forever per language, never cleared unless full clear happens
  * - Optional cross-tab synchronization via Broadcast Channel and localStorage
  *
  * Rules:
- * - common translations are always loaded on initialization and cached forever
- * - If fingerprint exists, load special translations for that fingerprint
+ * - common:{toLang} translations are always loaded on initialization and cached forever per language
+ * - If fingerprint exists, load special translations for that fingerprint+language
+ * - Switching languages preserves cached data for other languages
  * - Switching fingerprints doesn't clear cached data for other fingerprints
- * - Lookup priority: current fingerprint first, common second
- * - All translations are cached independently by fingerprint
+ * - Lookup priority: current fingerprint+language first, common+language second
+ * - All translations are cached independently by fingerprint and language
  */
 class TranslationPool {
+    /**
+     * Generate pool key from fingerprint and language
+     * @param fingerprint Fingerprint (or 'common')
+     * @param toLang Target language code
+     * @returns Pool key in format "fingerprint:toLang"
+     */
+    getPoolKey(fingerprint, toLang) {
+        return `${fingerprint}:${toLang}`;
+    }
     /**
      * Create a new TranslationPool for a specific sense
      * @param client TranslationClient instance
@@ -65,25 +85,69 @@ class TranslationPool {
      * @param crossTabOptions Cross-tab synchronization options
      */
     constructor(client, senseId, crossTabOptions) {
-        // Separate cache for each fingerprint: fingerprint -> Map<text, translation>
+        // Separate cache for each fingerprint+language: "fingerprint:toLang" -> Map<text, translation>
         this.pools = new Map();
         this.currentFingerprint = null;
+        this.currentToLang = null;
         this.broadcastChannel = null;
         this.loading = false;
-        this.loadedFingerprints = new Set();
+        // Track loaded fingerprint+language combinations: "fingerprint:toLang"
+        this.loadedCombinations = new Set();
+        // Language version tracking to validate translations during language changes
+        this.currentLanguageVersion = 0;
         // Observer pattern for queueing translation requests during load
         this.queuedRequests = [];
         this.pendingResolutions = {};
+        // Callback for translation loaded events (reactive binding)
+        this.onTranslationLoaded = null;
+        // Callback for pool initialization complete
+        this.onPoolInitialized = null;
+        // Callback for queue processing complete
+        this.onQueueProcessed = null;
+        // Callback for when a queued translation request is updated with actual translation
+        // This is called after processQueuedRequests completes, allowing UI to refresh
+        this.onTranslationUpdated = null;
         this.client = client;
         this.senseId = senseId;
         this.crossTabOptions = Object.assign(Object.assign({}, defaultCrossTabOptions), crossTabOptions);
-        // Initialize common pool always
-        this.pools.set('common', new Map());
+        // Note: Pools are now initialized per-language in initialize() or when language is first used
+        // We no longer pre-initialize 'common' here - it's done when toLang is set
         if (this.crossTabOptions.enabled && typeof BroadcastChannel !== 'undefined') {
             this.initCrossTabSync();
         }
         // Load from localStorage if cross-tab enabled and storage available
         this.loadFromStorage();
+    }
+    // ========== Reactive Binding Callbacks ==========
+    /**
+     * Set callback for when a translation is added to the pool
+     * This enables reactive UI updates when translations become available
+     * @param callback Function called with (text, translation) when a translation is added
+     */
+    setTranslationLoadedCallback(callback) {
+        this.onTranslationLoaded = callback;
+    }
+    /**
+     * Set callback for when the pool initialization is complete
+     * @param callback Function called when pool is fully initialized
+     */
+    setPoolInitializedCallback(callback) {
+        this.onPoolInitialized = callback;
+    }
+    /**
+     * Set callback for when queued requests are processed
+     * @param callback Function called with the count of processed requests
+     */
+    setQueueProcessedCallback(callback) {
+        this.onQueueProcessed = callback;
+    }
+    /**
+     * Set callback for when a queued translation request is updated with actual translation
+     * This is called after processQueuedRequests completes, allowing UI to refresh
+     * @param callback Function called with (text, translation) when a queued translation is updated
+     */
+    setTranslationUpdatedCallback(callback) {
+        this.onTranslationUpdated = callback;
     }
     /**
      * Initialize cross-tab synchronization
@@ -121,31 +185,46 @@ class TranslationPool {
         if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
             return;
         }
-        // Always load common first
-        this.loadFingerprintFromStorage('common');
-        // Load current fingerprint if exists
-        if (this.currentFingerprint) {
-            this.loadFingerprintFromStorage(this.currentFingerprint);
+        // Load all stored language pools
+        // Storage key format: {prefix}{senseId}_{fingerprint}:{toLang}
+        const prefix = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_`;
+        // Try to find common pools for any language
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (key && key.startsWith(prefix) && key.includes(':')) {
+                const afterPrefix = key.substring(prefix.length);
+                const colonIndex = afterPrefix.lastIndexOf(':');
+                if (colonIndex > 0) {
+                    const fingerprint = afterPrefix.substring(0, colonIndex);
+                    const toLang = afterPrefix.substring(colonIndex + 1);
+                    if (fingerprint === 'common') {
+                        this.loadLanguageFromStorage(fingerprint, toLang);
+                    }
+                }
+            }
         }
     }
     /**
-     * Load a specific fingerprint's cache from localStorage
+     * Load a specific fingerprint+language's cache from localStorage
+     * @param fingerprint Fingerprint (or 'common')
+     * @param toLang Target language code
      */
-    loadFingerprintFromStorage(fp) {
-        const storageKey = this.getStorageKey(fp);
+    loadLanguageFromStorage(fingerprint, toLang) {
+        const poolKey = this.getPoolKey(fingerprint, toLang);
+        const storageKey = this.getStorageKey(fingerprint, toLang);
         try {
             const stored = localStorage.getItem(storageKey);
             if (stored) {
                 const data = JSON.parse(stored);
-                let pool = this.pools.get(fp);
+                let pool = this.pools.get(poolKey);
                 if (!pool) {
                     pool = new Map();
-                    this.pools.set(fp, pool);
+                    this.pools.set(poolKey, pool);
                 }
                 data.forEach(({ text, translation }) => {
                     pool.set(text, translation);
                 });
-                this.loadedFingerprints.add(fp);
+                this.loadedCombinations.add(poolKey);
             }
         }
         catch (e) {
@@ -153,21 +232,26 @@ class TranslationPool {
         }
     }
     /**
-     * Get storage key for a specific fingerprint
+     * Get storage key for a specific fingerprint and language
+     * @param fingerprint Fingerprint (or 'common')
+     * @param toLang Target language code
      */
-    getStorageKey(fp) {
-        return `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${fp}`;
+    getStorageKey(fingerprint, toLang) {
+        return `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${fingerprint}:${toLang}`;
     }
     /**
      * Save cache to localStorage
+     * @param fingerprint Fingerprint (or 'common')
+     * @param toLang Target language code
      */
-    saveToStorage(fp) {
+    saveToStorage(fingerprint, toLang) {
         if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
             return;
         }
-        const storageKey = this.getStorageKey(fp);
+        const poolKey = this.getPoolKey(fingerprint, toLang);
+        const storageKey = this.getStorageKey(fingerprint, toLang);
         try {
-            const pool = this.pools.get(fp);
+            const pool = this.pools.get(poolKey);
             const data = [];
             if (pool) {
                 pool.forEach((translation, text) => {
@@ -188,14 +272,15 @@ class TranslationPool {
             return;
         }
         const fp = this.currentFingerprint || 'common';
+        const toLang = this.currentToLang || 'en';
         const message = {
             type: 'cache_update',
             senseId: this.senseId,
             fingerprint: this.currentFingerprint || undefined,
-            data: Object.assign({ result: this.getAllForFingerprint(fp) }, (text && translation && { text, translation }))
+            data: Object.assign({ result: this.getAllForFingerprint(fp, toLang) }, (text && translation && { text, translation }))
         };
         this.broadcastChannel.postMessage(message);
-        this.saveToStorage(fp);
+        this.saveToStorage(fp, toLang);
     }
     /**
      * Handle incoming cache update from another tab
@@ -203,25 +288,28 @@ class TranslationPool {
     handleCacheUpdate(message) {
         var _a, _b, _c;
         const fp = message.fingerprint || 'common';
+        // Get toLang from the message or use current
+        const toLang = this.currentToLang || 'en';
+        const poolKey = this.getPoolKey(fp, toLang);
         if ((_a = message.data) === null || _a === void 0 ? void 0 : _a.result) {
-            // Update full cache for this fingerprint
-            let pool = this.pools.get(fp);
+            // Update full cache for this fingerprint+language
+            let pool = this.pools.get(poolKey);
             if (!pool) {
                 pool = new Map();
-                this.pools.set(fp, pool);
+                this.pools.set(poolKey, pool);
             }
             pool.clear();
             message.data.result.forEach(({ text, translation }) => {
                 pool.set(text, translation);
             });
-            this.loadedFingerprints.add(fp);
+            this.loadedCombinations.add(poolKey);
         }
         // Update specific entry
         if (((_b = message.data) === null || _b === void 0 ? void 0 : _b.text) && ((_c = message.data) === null || _c === void 0 ? void 0 : _c.translation)) {
-            const pool = this.pools.get(fp) || new Map();
+            const pool = this.pools.get(poolKey) || new Map();
             pool.set(message.data.text, message.data.translation);
-            this.pools.set(fp, pool);
-            this.saveToStorage(fp);
+            this.pools.set(poolKey, pool);
+            this.saveToStorage(fp, toLang);
         }
     }
     /**
@@ -250,39 +338,19 @@ class TranslationPool {
      * @returns Original text as the initial response
      */
     queueTranslationRequest(request) {
-        // Return original text immediately for fast fallback
-        const initialResponse = {
-            originalText: request.text,
-            translatedText: request.text,
-            provider: 'fast_fallback',
-            timestamp: Date.now(),
-            finished: true,
-            cached: false,
-            fromLang: request.fromLang,
-            toLang: request.toLang
-        };
-        // Resolve immediately with original text
-        const promise = new Promise((resolve) => {
-            resolve(initialResponse);
+        // Create a pending promise that will be resolved after pool loads
+        const promise = new Promise((resolve, reject) => {
+            // Queue the request for processing after pool loads
+            const queuedReq = Object.assign(Object.assign({}, request), { resolveFunction: resolve, rejectFunction: reject });
+            this.queuedRequests.push(queuedReq);
+            // Store reference to allow later resolution
+            const key = `${request.text}-${request.fingerprint || 'common'}`;
+            this.pendingResolutions[key] = {
+                resolve: resolve,
+                reject: reject
+            };
         });
-        // Queue the request for processing after pool loads
-        const queuedReq = Object.assign(Object.assign({}, request), { resolveFunction: (result) => {
-                // Remove from pending resolutions
-                delete this.pendingResolutions[`${request.text}-${request.fingerprint || 'common'}`];
-                // Resolve the promise for all listeners
-                queuedReq.resolveFunction(result);
-            }, rejectFunction: (error) => {
-                delete this.pendingResolutions[`${request.text}-${request.fingerprint || 'common'}`];
-                queuedReq.rejectFunction(error);
-            } });
-        this.queuedRequests.push(queuedReq);
-        // Store reference to allow later resolution
-        const key = `${request.text}-${request.fingerprint || 'common'}`;
-        this.pendingResolutions[key] = {
-            resolve: (result) => queuedReq.resolveFunction(result),
-            reject: (error) => queuedReq.rejectFunction(error)
-        };
-        // Return original text immediately
+        // Return pending promise - will be resolved when processQueuedRequests completes
         return promise;
     }
     /**
@@ -290,58 +358,97 @@ class TranslationPool {
      * This should be called when the pool is fully initialized
      * Includes automatic retry mechanism for failed requests
      */
-    async processQueuedRequests(maxRetries = 3, retryDelayMs = 1000) {
-        if (this.queuedRequests.length === 0) {
-            return;
-        }
-        console.log(`[TranslationPool] Processing ${this.queuedRequests.length} queued translation requests...`);
-        // Copy queued requests and clear the queue
-        const requestsToProcess = [...this.queuedRequests];
-        this.queuedRequests = [];
-        // Process each request with retry mechanism
-        const processWithRetry = async (req, attempt = 0) => {
-            try {
-                // Check if translation is now available in pool
-                const lookup = this.lookup(req.text, req.fingerprint);
-                if (lookup.found) {
-                    // Translation is now available in pool, use it
-                    const translation = await this.client.translate(req.text, req.toLang, req.fromLang, req.fingerprint);
-                    return { text: req.text, translation, success: true };
-                }
-                else {
-                    // Not in pool, request from backend
-                    const response = await this.client.translateWithDetails(req.text, req.toLang, req.fromLang, req.fingerprint);
-                    return { text: req.text, translation: response.translatedText, success: true };
-                }
+    processQueuedRequests() {
+        return __awaiter(this, arguments, void 0, function* (maxRetries = 3, retryDelayMs = 1000) {
+            if (this.queuedRequests.length === 0) {
+                return;
             }
-            catch (error) {
-                console.warn(`[TranslationPool] Request failed (attempt ${attempt + 1}/${maxRetries}):`, error.message);
-                if (attempt < maxRetries - 1) {
-                    // Wait before retry
-                    await new Promise(resolve => setTimeout(resolve, retryDelayMs * (attempt + 1)));
-                    return processWithRetry(req, attempt + 1);
+            console.log(`[TranslationPool] Processing ${this.queuedRequests.length} queued translation requests...`);
+            // Copy queued requests and clear the queue
+            const requestsToProcess = [...this.queuedRequests];
+            this.queuedRequests = [];
+            // Process each request with retry mechanism
+            const processWithRetry = (req_1, ...args_1) => __awaiter(this, [req_1, ...args_1], void 0, function* (req, attempt = 0) {
+                try {
+                    // Check if translation is now available in pool
+                    const lookup = this.lookup(req.text, req.fingerprint);
+                    if (lookup.found) {
+                        // Translation is now available in pool, use it
+                        const translation = yield this.client.translate(req.text, req.toLang, req.fromLang, req.fingerprint);
+                        return { text: req.text, translation, success: true };
+                    }
+                    else {
+                        // Not in pool, request from backend
+                        const response = yield this.client.translateWithDetails(req.text, req.toLang, req.fromLang, req.fingerprint);
+                        return { text: req.text, translation: response.translatedText, success: true };
+                    }
                 }
-                // All retries failed, return original text as fallback
-                console.error(`[TranslationPool] All retries failed for: "${req.text}", using original text`);
-                return { text: req.text, translation: req.text, success: false };
+                catch (error) {
+                    console.warn(`[TranslationPool] Request failed (attempt ${attempt + 1}/${maxRetries}):`, error.message);
+                    if (attempt < maxRetries - 1) {
+                        // Wait before retry
+                        yield new Promise(resolve => setTimeout(resolve, retryDelayMs * (attempt + 1)));
+                        return processWithRetry(req, attempt + 1);
+                    }
+                    // All retries failed, return original text as fallback
+                    console.error(`[TranslationPool] All retries failed for: "${req.text}", using original text`);
+                    return { text: req.text, translation: req.text, success: false };
+                }
+            });
+            // Process all requests in parallel
+            const promises = requestsToProcess.map(req => processWithRetry(req));
+            const results = yield Promise.all(promises);
+            // Add successful translations to pool and resolve promises
+            const successCount = results.filter(r => r.success).length;
+            const failCount = results.length - successCount;
+            results.forEach(({ text, translation }, index) => {
+                // Add translation to pool
+                this.addTranslation(text, translation);
+                // Resolve the promise for the queued request with the actual translation
+                const queuedReq = requestsToProcess[index];
+                if (queuedReq && queuedReq.resolveFunction) {
+                    const response = {
+                        originalText: text,
+                        translatedText: translation,
+                        provider: 'queued_translation',
+                        timestamp: Date.now(),
+                        finished: true,
+                        cached: false,
+                        fromLang: queuedReq.fromLang,
+                        toLang: queuedReq.toLang
+                    };
+                    queuedReq.resolveFunction(response);
+                    // Remove from pending resolutions
+                    const key = `${text}-${queuedReq.fingerprint || 'common'}`;
+                    delete this.pendingResolutions[key];
+                    // Trigger onTranslationUpdated callback to notify UI
+                    if (this.onTranslationUpdated) {
+                        this.onTranslationUpdated(text, translation);
+                    }
+                }
+            });
+            // Handle failed requests - reject their promises
+            requestsToProcess.forEach((queuedReq, index) => {
+                if (!results[index].success && queuedReq.rejectFunction) {
+                    const error = new Error(`Translation failed for: ${queuedReq.text}`);
+                    queuedReq.rejectFunction(error);
+                    // Remove from pending resolutions
+                    const key = `${queuedReq.text}-${queuedReq.fingerprint || 'common'}`;
+                    delete this.pendingResolutions[key];
+                }
+            });
+            // Broadcast updates to other tabs
+            this.broadcastUpdate();
+            console.log(`[TranslationPool] Completed processing ${results.length} queued requests (${successCount} success, ${failCount} failed)`);
+            // Trigger queue processed callback for reactive UI updates
+            if (this.onQueueProcessed) {
+                this.onQueueProcessed(results.length);
             }
-        };
-        // Process all requests in parallel
-        const promises = requestsToProcess.map(req => processWithRetry(req));
-        const results = await Promise.all(promises);
-        // Add successful translations to pool
-        const successCount = results.filter(r => r.success).length;
-        const failCount = results.length - successCount;
-        results.forEach(({ text, translation }) => {
-            this.addTranslation(text, translation);
+            // If there were failures, log them
+            if (failCount > 0) {
+                console.warn(`[TranslationPool] ${failCount} requests failed after ${maxRetries} retries`);
+            }
         });
-        // Broadcast updates to other tabs
-        this.broadcastUpdate();
-        console.log(`[TranslationPool] Completed processing ${results.length} queued requests (${successCount} success, ${failCount} failed)`);
-        // If there were failures, log them
-        if (failCount > 0) {
-            console.warn(`[TranslationPool] ${failCount} requests failed after ${maxRetries} retries`);
-        }
     }
     /**
      * Check if there are any pending queued requests
@@ -364,124 +471,181 @@ class TranslationPool {
         return this.loading;
     }
     /**
-     * Initialize the pool - always loads common first, then loads current fingerprint if set
+     * Check if a specific fingerprint+language combination is loaded
+     * Or check if any combination for this language is loaded
+     * @param fingerprint Fingerprint (or 'common') OR toLang when checking whole language
+     * @param toLang Target language code (required when fingerprint is provided)
+     * @returns boolean indicating if loaded
+     */
+    isLanguageLoaded(fingerprint, toLang) {
+        if (toLang === undefined) {
+            // Single parameter mode - check if any combination for this language
+            const checkedToLang = fingerprint;
+            for (const key of this.loadedCombinations) {
+                if (key.endsWith(`:${checkedToLang}`)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // Two parameter mode - check specific combination
+        const poolKey = this.getPoolKey(fingerprint, toLang);
+        return this.loadedCombinations.has(poolKey);
+    }
+    /**
+     * Initialize the pool for a specific language - always loads common first, then loads current fingerprint if set
      * If fingerprint is set, loads special translations; common is always preloaded
      * After loading, processes any queued translation requests
+     * @param toLang Target language for translations (required for language-specific caching)
      */
-    async initialize() {
-        if (this.loading) {
-            return;
-        }
-        this.loading = true;
-        try {
-            console.log('[TranslationPool] Starting pool initialization...');
-            // Always preload common first (required)
-            if (!this.loadedFingerprints.has('common')) {
-                await this.loadFingerprintTranslations('common', undefined);
-                console.log('[TranslationPool] Common translations loaded');
+    initialize(toLang) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.loading) {
+                return;
             }
-            // Then load current fingerprint if set and not loaded
-            if (this.currentFingerprint && !this.loadedFingerprints.has(this.currentFingerprint)) {
-                await this.loadFingerprintTranslations(this.currentFingerprint, this.currentFingerprint);
-                console.log(`[TranslationPool] ${this.currentFingerprint} translations loaded`);
+            this.loading = true;
+            this.currentToLang = toLang;
+            try {
+                console.log(`[TranslationPool] Starting pool initialization... (toLang: ${toLang})`);
+                const commonPoolKey = this.getPoolKey('common', toLang);
+                // Always preload common first for this language (required)
+                if (!this.loadedCombinations.has(commonPoolKey)) {
+                    yield this.loadFingerprintTranslations('common', undefined, toLang);
+                    console.log(`[TranslationPool] Common translations loaded for ${toLang}`);
+                }
+                // Then load current fingerprint if set and not loaded for this language
+                if (this.currentFingerprint) {
+                    const fpPoolKey = this.getPoolKey(this.currentFingerprint, toLang);
+                    if (!this.loadedCombinations.has(fpPoolKey)) {
+                        yield this.loadFingerprintTranslations(this.currentFingerprint, this.currentFingerprint, toLang);
+                        console.log(`[TranslationPool] ${this.currentFingerprint} translations loaded for ${toLang}`);
+                    }
+                }
+                // Broadcast to other tabs after full initialization
+                this.broadcastUpdate();
+                console.log(`[TranslationPool] Pool initialization completed for ${toLang}`);
+                // Trigger pool initialized callback for reactive UI updates
+                if (this.onPoolInitialized) {
+                    this.onPoolInitialized();
+                }
+                // Process queued requests after pool is loaded
+                yield this.processQueuedRequests();
             }
-            // Broadcast to other tabs after full initialization
-            this.broadcastUpdate();
-            console.log('[TranslationPool] Pool initialization completed');
-            // Process queued requests after pool is loaded
-            await this.processQueuedRequests();
-        }
-        finally {
-            this.loading = false;
-        }
-    }
-    /**
-     * Load translations for a specific fingerprint
-     */
-    async loadFingerprintTranslations(fp, fingerprint) {
-        // Already loaded
-        if (this.loadedFingerprints.has(fp)) {
-            return;
-        }
-        // Ensure pool exists for this fingerprint
-        let pool = this.pools.get(fp);
-        if (!pool) {
-            pool = new Map();
-            this.pools.set(fp, pool);
-        }
-        // Use streaming for batch loading
-        await this.client.translateStream({
-            senseId: this.senseId,
-            fingerprint,
-            batchSize: 500
-        }, (response) => {
-            // Add all translations from this batch to the fingerprint's pool
-            // response.translation is a Record<string, string> (key-value map)
-            Object.entries(response.translation).forEach(([text, translate]) => {
-                pool.set(text, translate);
-            });
-            return true; // Continue streaming
+            finally {
+                this.loading = false;
+            }
         });
-        // Mark as loaded
-        this.loadedFingerprints.add(fp);
     }
     /**
-     * Switch to a different fingerprint, loads its translations if not already loaded
-     * Doesn't clear existing cached translations for other fingerprints
+     * Load translations for a specific fingerprint and language
+     * @param fp Pool key fingerprint (or 'common')
+     * @param fingerprint Actual fingerprint for API request (undefined for common)
+     * @param toLang Target language code
+     */
+    loadFingerprintTranslations(fp, fingerprint, toLang) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const poolKey = this.getPoolKey(fp, toLang);
+            // Already loaded
+            if (this.loadedCombinations.has(poolKey)) {
+                return;
+            }
+            // Ensure pool exists for this fingerprint+language
+            let pool = this.pools.get(poolKey);
+            if (!pool) {
+                pool = new Map();
+                this.pools.set(poolKey, pool);
+            }
+            // Use streaming for batch loading
+            yield this.client.translateStream({
+                senseId: this.senseId,
+                fingerprint,
+                to_lang: toLang,
+                batchSize: 500
+            }, (response) => {
+                // Add all translations from this batch to the fingerprint's pool
+                // response.translation is a Record<string, string> (key-value map)
+                Object.entries(response.translation).forEach(([text, translate]) => {
+                    pool.set(text, translate);
+                });
+                return true; // Continue streaming
+            });
+            // Mark as loaded
+            this.loadedCombinations.add(poolKey);
+        });
+    }
+    /**
+     * Switch to a different fingerprint, loads its translations if not already loaded for current language
+     * Doesn't clear existing cached translations for other fingerprints or languages
      * @param fingerprint The fingerprint to switch to
      */
-    async switchFingerprint(fingerprint) {
-        this.currentFingerprint = fingerprint;
-        // Ensure pool exists
-        if (!this.pools.has(fingerprint)) {
-            this.pools.set(fingerprint, new Map());
-        }
-        // Load from localStorage first
-        this.loadFingerprintFromStorage(fingerprint);
-        // Check if we need to load from backend
-        if (!this.loadedFingerprints.has(fingerprint)) {
-            await this.loadFingerprintTranslations(fingerprint, fingerprint);
-        }
+    switchFingerprint(fingerprint) {
+        return __awaiter(this, void 0, void 0, function* () {
+            this.currentFingerprint = fingerprint;
+            // Ensure pool exists for current language
+            const toLang = this.currentToLang || 'en';
+            const poolKey = this.getPoolKey(fingerprint, toLang);
+            if (!this.pools.has(poolKey)) {
+                this.pools.set(poolKey, new Map());
+            }
+            // Load from localStorage first
+            this.loadLanguageFromStorage(fingerprint, toLang);
+            // Check if we need to load from backend
+            const fpPoolKey = this.getPoolKey(fingerprint, toLang);
+            if (!this.loadedCombinations.has(fpPoolKey)) {
+                yield this.loadFingerprintTranslations(fingerprint, fingerprint, toLang);
+            }
+        });
     }
     /**
-     * Clear cached translations for a specific fingerprint to free memory
-     * Doesn't affect other fingerprints or common
+     * Clear cached translations for a specific fingerprint and language to free memory
+     * Doesn't affect other fingerprints or languages
      * @param fingerprint The fingerprint to clear
+     * @param toLang Optional target language (uses currentToLang if not provided)
      */
-    clearFingerprint(fingerprint) {
-        this.pools.delete(fingerprint);
-        this.loadedFingerprints.delete(fingerprint);
+    clearFingerprint(fingerprint, toLang) {
+        const lang = toLang || this.currentToLang || 'en';
+        const poolKey = this.getPoolKey(fingerprint, lang);
+        this.pools.delete(poolKey);
+        this.loadedCombinations.delete(poolKey);
         // Clear localStorage
         if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
-            const storageKey = this.getStorageKey(fingerprint);
+            const storageKey = this.getStorageKey(fingerprint, lang);
             localStorage.removeItem(storageKey);
         }
     }
     /**
-     * Check if a fingerprint has been loaded
+     * Check if a fingerprint has been loaded for a specific language
      * @param fingerprint Fingerprint to check
+     * @param toLang Target language (uses currentToLang if not provided)
      */
-    isLoaded(fingerprint) {
-        return this.loadedFingerprints.has(fingerprint);
+    isLoaded(fingerprint, toLang) {
+        const lang = toLang || this.currentToLang || 'en';
+        const poolKey = this.getPoolKey(fingerprint, lang);
+        return this.loadedCombinations.has(poolKey);
     }
     /**
-     * Load a fingerprint if not already loaded
+     * Load a fingerprint if not already loaded for the specified language
      * @param fingerprint Fingerprint to load
+     * @param toLang Target language (uses currentToLang if not provided)
      */
-    async loadFingerprintIfNotLoaded(fingerprint) {
-        if (this.loadedFingerprints.has(fingerprint)) {
-            return;
-        }
-        // Load from localStorage first
-        this.loadFingerprintFromStorage(fingerprint);
-        // Check if still not loaded after localStorage
-        if (!this.loadedFingerprints.has(fingerprint)) {
-            await this.loadFingerprintTranslations(fingerprint, fingerprint);
-        }
+    loadFingerprintIfNotLoaded(fingerprint, toLang) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const lang = toLang || this.currentToLang || 'en';
+            const poolKey = this.getPoolKey(fingerprint, lang);
+            if (this.loadedCombinations.has(poolKey)) {
+                return;
+            }
+            // Load from localStorage first
+            this.loadLanguageFromStorage(fingerprint, lang);
+            // Check if still not loaded after localStorage
+            if (!this.loadedCombinations.has(poolKey)) {
+                yield this.loadFingerprintTranslations(fingerprint, fingerprint, lang);
+            }
+        });
     }
     /**
      * Clear the current fingerprint to free memory (switch back to common)
-     * Current fingerprint becomes null, only common remains active
+     * Current fingerprint becomes null, only common remains active for current language
      */
     clearCurrentFingerprint() {
         if (this.currentFingerprint) {
@@ -490,16 +654,19 @@ class TranslationPool {
         }
     }
     /**
-     * Lookup translation
+     * Lookup translation for a specific language
      * Priority: provided fingerprint (if any) → current fingerprint (if set) → common → not found
      * @param text Original text to lookup
      * @param fingerprint Optional specific fingerprint to lookup (overrides current fingerprint)
+     * @param toLang Target language (uses currentToLang if not provided)
      * @returns Lookup result
      */
-    lookup(text, fingerprint) {
+    lookup(text, fingerprint, toLang) {
+        const lang = toLang || this.currentToLang || 'en';
         // Check provided fingerprint first if given
         if (fingerprint) {
-            const targetPool = this.pools.get(fingerprint);
+            const poolKey = this.getPoolKey(fingerprint, lang);
+            const targetPool = this.pools.get(poolKey);
             if (targetPool && targetPool.has(text)) {
                 return {
                     found: true,
@@ -510,7 +677,8 @@ class TranslationPool {
         }
         // Check current fingerprint next if we have one and no specific fingerprint provided
         if (!fingerprint && this.currentFingerprint) {
-            const currentPool = this.pools.get(this.currentFingerprint);
+            const poolKey = this.getPoolKey(this.currentFingerprint, lang);
+            const currentPool = this.pools.get(poolKey);
             if (currentPool && currentPool.has(text)) {
                 return {
                     found: true,
@@ -519,8 +687,9 @@ class TranslationPool {
                 };
             }
         }
-        // Fallback to common
-        const commonPool = this.pools.get('common');
+        // Fallback to common for this language
+        const commonPoolKey = this.getPoolKey('common', lang);
+        const commonPool = this.pools.get(commonPoolKey);
         if (commonPool && commonPool.has(text)) {
             return {
                 found: true,
@@ -536,21 +705,55 @@ class TranslationPool {
         };
     }
     /**
-     * Add a translation to the pool
+     * Add a translation to the pool for a specific language
      * Adds to current fingerprint pool (or common if no fingerprint set)
      * @param text Original text
      * @param translation Translated text
      * @param fingerprint Optional specific fingerprint to add to (overrides current fingerprint)
+     * @param languageVersion Optional language version to validate (if provided, must match current version)
+     * @param toLang Optional target language (uses currentToLang if not provided)
      */
-    addTranslation(text, translation, fingerprint) {
+    addTranslation(text, translation, fingerprint, languageVersion, toLang) {
+        const lang = toLang || this.currentToLang || 'en';
+        // Validate language version if provided - reject stale translations from previous language
+        if (languageVersion !== undefined && languageVersion !== this.currentLanguageVersion) {
+            console.log(`[TranslationPool] Discarding stale translation for "${text}" (version ${languageVersion} vs current ${this.currentLanguageVersion})`);
+            return;
+        }
+        // Validate toLang if provided - reject translations for wrong target language
+        if (toLang !== undefined && this.currentToLang && toLang !== this.currentToLang) {
+            console.log(`[TranslationPool] Discarding translation for wrong language for "${text}" (toLang ${toLang} vs current ${this.currentToLang})`);
+            return;
+        }
         const fp = fingerprint || this.currentFingerprint || 'common';
-        let pool = this.pools.get(fp);
+        const poolKey = this.getPoolKey(fp, lang);
+        let pool = this.pools.get(poolKey);
         if (!pool) {
             pool = new Map();
-            this.pools.set(fp, pool);
+            this.pools.set(poolKey, pool);
         }
         pool.set(text, translation);
         this.broadcastUpdate(text, translation);
+        // Trigger reactive callback for UI updates
+        if (this.onTranslationLoaded) {
+            this.onTranslationLoaded(text, translation);
+        }
+    }
+    /**
+     * Update the language version (called when language changes)
+     * This invalidates all pending translations from the previous language
+     * @param version New language version
+     */
+    setLanguageVersion(version) {
+        this.currentLanguageVersion = version;
+    }
+    /**
+     * Set the current target language (called when language changes)
+     * This is used to validate translations before adding to pool
+     * @param toLang Target language
+     */
+    setToLang(toLang) {
+        this.currentToLang = toLang;
     }
     /**
      * Request translation from backend, automatically adds to pool if found
@@ -560,58 +763,63 @@ class TranslationPool {
      * @param toLang Target language
      * @returns Translation response
      */
-    async requestTranslation(text, fromLang, toLang) {
-        // Use translateStream API - backend will automatically call LLM if translation not found in database
-        return new Promise((resolve, reject) => {
-            this.client.translateStream({
-                senseId: this.senseId,
-                text,
-                from_lang: fromLang,
-                to_lang: toLang
-            }, (response) => {
-                // Check if we got a translation
-                if (response.translation && response.translation[text]) {
-                    const translatedText = response.translation[text];
-                    // Add to pool automatically
-                    this.addTranslation(text, translatedText);
-                    resolve({
-                        originalText: text,
-                        translatedText: translatedText,
-                        provider: 'translate-stream',
-                        timestamp: response.timestamp,
-                        finished: response.finished,
-                        cached: false,
-                        fromLang,
-                        toLang
-                    });
-                    return false; // Stop streaming
-                }
-                // Check for error
-                if (response.translation && response.translation['error']) {
-                    reject(new Error(response.translation['error']));
-                    return false;
-                }
-                // Continue if not finished
-                return !response.finished;
-            }).catch(reject);
+    requestTranslation(text, fromLang, toLang) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Use translateStream API - backend will automatically call LLM if translation not found in database
+            return new Promise((resolve, reject) => {
+                this.client.translateStream({
+                    senseId: this.senseId,
+                    text,
+                    from_lang: fromLang,
+                    to_lang: toLang
+                }, (response) => {
+                    // Check if we got a translation
+                    if (response.translation && response.translation[text]) {
+                        const translatedText = response.translation[text];
+                        // Add to pool automatically
+                        this.addTranslation(text, translatedText);
+                        resolve({
+                            originalText: text,
+                            translatedText: translatedText,
+                            provider: 'translate-stream',
+                            timestamp: response.timestamp,
+                            finished: response.finished,
+                            cached: false,
+                            fromLang,
+                            toLang
+                        });
+                        return false; // Stop streaming
+                    }
+                    // Check for error
+                    if (response.translation && response.translation['error']) {
+                        reject(new Error(response.translation['error']));
+                        return false;
+                    }
+                    // Continue if not finished
+                    return !response.finished;
+                }).catch(reject);
+            });
         });
     }
     /**
-     * Get all translations for current fingerprint (includes common if needed)
+     * Get all translations for current fingerprint and language
      * @returns Array of {text, translation}
      */
     getAll() {
         const fp = this.currentFingerprint || 'common';
-        return this.getAllForFingerprint(fp);
+        const toLang = this.currentToLang || 'en';
+        return this.getAllForFingerprint(fp, toLang);
     }
     /**
-     * Get all translations for a specific fingerprint
+     * Get all translations for a specific fingerprint and language
      * @param fp Fingerprint name
+     * @param toLang Target language code
      * @returns Array of {text, translation}
      */
-    getAllForFingerprint(fp) {
+    getAllForFingerprint(fp, toLang) {
         const result = [];
-        const pool = this.pools.get(fp);
+        const poolKey = this.getPoolKey(fp, toLang);
+        const pool = this.pools.get(poolKey);
         if (pool) {
             pool.forEach((translation, text) => {
                 result.push({ text, translation });
@@ -620,20 +828,25 @@ class TranslationPool {
         return result;
     }
     /**
-     * Clear all cached data to free memory
+     * Clear all cached data for all languages to free memory
      */
     clearAll() {
-        // Clear all fingerprints from memory
+        // Clear all fingerprint+language combinations from memory
         this.pools.clear();
-        this.loadedFingerprints.clear();
+        this.loadedCombinations.clear();
         this.currentFingerprint = null;
-        // Re-initialize common pool
-        this.pools.set('common', new Map());
+        this.currentToLang = null;
         // Clear all localStorage for this sense
         if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
-            // We can't easily iterate all fingerprints, but at least clear common
-            const storageKey = this.getStorageKey('common');
-            localStorage.removeItem(storageKey);
+            const prefix = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_`;
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith(prefix)) {
+                    keysToRemove.push(key);
+                }
+            }
+            keysToRemove.forEach(key => localStorage.removeItem(key));
         }
         // Broadcast clear to other tabs
         if (this.broadcastChannel && this.crossTabOptions.enabled) {
@@ -643,6 +856,52 @@ class TranslationPool {
                 fingerprint: undefined
             });
         }
+    }
+    /**
+     * Clear cached data for a specific language only
+     * Preserves caches for other languages
+     * @param toLang Target language to clear
+     */
+    clearLanguage(toLang) {
+        // Find and remove all pools for this language
+        const keysToRemove = [];
+        this.pools.forEach((_, key) => {
+            if (key.endsWith(`:${toLang}`)) {
+                keysToRemove.push(key);
+            }
+        });
+        keysToRemove.forEach(key => {
+            this.pools.delete(key);
+            this.loadedCombinations.delete(key);
+        });
+        // Clear localStorage for this language
+        if (typeof localStorage !== 'undefined' && this.crossTabOptions.enabled) {
+            const prefix = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_`;
+            const suffix = `:${toLang}`;
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && key.startsWith(prefix) && key.endsWith(suffix)) {
+                    keysToRemove.push(key);
+                }
+            }
+            keysToRemove.forEach(key => localStorage.removeItem(key));
+        }
+        console.log(`[TranslationPool] Cleared cache for language: ${toLang}`);
+    }
+    /**
+     * Get all loaded languages
+     * @returns Array of loaded language codes
+     */
+    getLoadedLanguages() {
+        const languages = new Set();
+        for (const key of this.loadedCombinations) {
+            const colonIndex = key.lastIndexOf(':');
+            if (colonIndex > 0) {
+                languages.add(key.substring(colonIndex + 1));
+            }
+        }
+        return Array.from(languages);
     }
     /**
      * Close the broadcast channel to free resources
@@ -775,8 +1034,43 @@ export class TranslationClient {
         this.currentFingerprint = null;
         this.initialized = false;
         this.initPromise = null;
+        this.currentToLang = null;
+        // Language version token to detect and handle language changes during concurrent requests
+        this.languageVersion = 0;
+        // AbortController to cancel in-flight requests when language changes
+        this.currentAbortController = null;
         // Cross-tab for LLM cache
         this.broadcastChannel = null;
+        // ========== Persistent gRPC-Web Connection ==========
+        // Single persistent EventSource connection for all streaming requests
+        this.persistentConnection = null;
+        // Connection state
+        this.connectionState = 'disconnected';
+        // Pending request callbacks mapped by request ID
+        this.pendingRequests = new Map();
+        // Next request ID counter
+        this.nextRequestId = 1;
+        // Connection connect promise
+        this.connectPromise = null;
+        // Reconnect delay for backoff
+        this.reconnectDelay = 1000;
+        // Maximum reconnect delay
+        this.maxReconnectDelay = 30000;
+        // Whether we should reconnect on disconnection
+        this.shouldReconnect = true;
+        // ========== Reactive Binding Event Emitter ==========
+        // Simple callback for translation updates (alternative to subscribers)
+        this.onTranslationUpdated = null;
+        // Simple callback for pool initialization complete
+        this.onPoolInitialized = null;
+        // Simple callback for queue processed events
+        this.onQueueProcessed = null;
+        // Subscribers for translation update events (for UI reactive updates)
+        this.translationUpdatedSubscribers = [];
+        // Subscribers for pool initialization complete
+        this.poolInitializedSubscribers = [];
+        // Subscribers for queue processed events
+        this.queueProcessedSubscribers = [];
         this.config = config;
         this.token = config.token;
         // Default baseUrl includes the API path prefix /api/v1/translate
@@ -814,6 +1108,172 @@ export class TranslationClient {
         }
         // Load from localStorage if cross-tab enabled
         this.loadFromStorage();
+        // Set up reactive binding callbacks to forward pool events to subscribers
+        this.setupReactiveCallbacks();
+        // Initialize persistent connection automatically
+        this.ensureConnected();
+    }
+    // ========== Reactive Binding Event Methods ==========
+    /**
+     * Set up callbacks to forward TranslationPool events to TranslationClient subscribers
+     */
+    setupReactiveCallbacks() {
+        // Forward translation loaded events
+        this.pool.setTranslationLoadedCallback((text, translation) => {
+            this.notifyTranslationUpdated(text, translation);
+        });
+        // Forward pool initialized events
+        this.pool.setPoolInitializedCallback(() => {
+            this.notifyPoolInitialized();
+        });
+        // Forward queue processed events
+        this.pool.setQueueProcessedCallback((count) => {
+            this.notifyQueueProcessed(count);
+        });
+    }
+    /**
+     * Subscribe to translation update events
+     * Called when a new translation is added to the pool
+     * @param callback Function called with (text, translation) when translation is updated
+     * @returns Unsubscribe function
+     */
+    subscribeTranslationUpdated(callback) {
+        this.translationUpdatedSubscribers.push(callback);
+        // Return unsubscribe function
+        return () => {
+            const index = this.translationUpdatedSubscribers.indexOf(callback);
+            if (index > -1) {
+                this.translationUpdatedSubscribers.splice(index, 1);
+            }
+        };
+    }
+    /**
+     * Unsubscribe from translation update events
+     * @param callback The callback to remove
+     */
+    unsubscribeTranslationUpdated(callback) {
+        const index = this.translationUpdatedSubscribers.indexOf(callback);
+        if (index > -1) {
+            this.translationUpdatedSubscribers.splice(index, 1);
+        }
+    }
+    /**
+     * Subscribe to pool initialization complete events
+     * @param callback Function called when pool is fully initialized
+     * @returns Unsubscribe function
+     */
+    subscribePoolInitialized(callback) {
+        this.poolInitializedSubscribers.push(callback);
+        return () => {
+            const index = this.poolInitializedSubscribers.indexOf(callback);
+            if (index > -1) {
+                this.poolInitializedSubscribers.splice(index, 1);
+            }
+        };
+    }
+    /**
+     * Unsubscribe from pool initialization events
+     * @param callback The callback to remove
+     */
+    unsubscribePoolInitialized(callback) {
+        const index = this.poolInitializedSubscribers.indexOf(callback);
+        if (index > -1) {
+            this.poolInitializedSubscribers.splice(index, 1);
+        }
+    }
+    /**
+     * Subscribe to queue processed events
+     * Called when queued translation requests are processed
+     * @param callback Function called with the count of processed requests
+     * @returns Unsubscribe function
+     */
+    subscribeQueueProcessed(callback) {
+        this.queueProcessedSubscribers.push(callback);
+        return () => {
+            const index = this.queueProcessedSubscribers.indexOf(callback);
+            if (index > -1) {
+                this.queueProcessedSubscribers.splice(index, 1);
+            }
+        };
+    }
+    /**
+     * Unsubscribe from queue processed events
+     * @param callback The callback to remove
+     */
+    unsubscribeQueueProcessed(callback) {
+        const index = this.queueProcessedSubscribers.indexOf(callback);
+        if (index > -1) {
+            this.queueProcessedSubscribers.splice(index, 1);
+        }
+    }
+    /**
+     * Notify all subscribers when a translation is updated
+     */
+    notifyTranslationUpdated(text, translation) {
+        // Call simple callback if set
+        if (this.onTranslationUpdated) {
+            try {
+                this.onTranslationUpdated(text, translation);
+            }
+            catch (error) {
+                console.error('[TranslationClient] Error in onTranslationUpdated callback:', error);
+            }
+        }
+        // Call all subscribers
+        this.translationUpdatedSubscribers.forEach(callback => {
+            try {
+                callback(text, translation);
+            }
+            catch (error) {
+                console.error('[TranslationClient] Error in translationUpdated subscriber:', error);
+            }
+        });
+    }
+    /**
+     * Notify all subscribers when pool is initialized
+     */
+    notifyPoolInitialized() {
+        // Call simple callback if set
+        if (this.onPoolInitialized) {
+            try {
+                this.onPoolInitialized();
+            }
+            catch (error) {
+                console.error('[TranslationClient] Error in onPoolInitialized callback:', error);
+            }
+        }
+        // Call all subscribers
+        this.poolInitializedSubscribers.forEach(callback => {
+            try {
+                callback();
+            }
+            catch (error) {
+                console.error('[TranslationClient] Error in poolInitialized subscriber:', error);
+            }
+        });
+    }
+    /**
+     * Notify all subscribers when queue is processed
+     */
+    notifyQueueProcessed(count) {
+        // Call simple callback if set
+        if (this.onQueueProcessed) {
+            try {
+                this.onQueueProcessed(count);
+            }
+            catch (error) {
+                console.error('[TranslationClient] Error in onQueueProcessed callback:', error);
+            }
+        }
+        // Call all subscribers
+        this.queueProcessedSubscribers.forEach(callback => {
+            try {
+                callback(count);
+            }
+            catch (error) {
+                console.error('[TranslationClient] Error in queueProcessed subscriber:', error);
+            }
+        });
     }
     /**
      * Initialize cross-tab synchronization via Broadcast Channel
@@ -962,121 +1422,37 @@ export class TranslationClient {
   凤   * GetSenseTranslate - One-shot unary request with pagination
      * @param request Request parameters
      */
-    async getSenseTranslate(request) {
-        const url = `${this.baseUrl}/api/v1/translate/TranslationService/GetSenseTranslate`;
-        const response = await this.fetchJson(url, request);
-        return response;
+    getSenseTranslate(request) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const url = `${this.baseUrl}/TranslationService/GetSenseTranslate`;
+            const response = yield this.fetchJson(url, request);
+            return response;
+        });
     }
     /**
      * TranslateStream - Server streaming, receives multiple batches progressively
      * @param request Request parameters
      * @param onBatch Callback for each batch received. Return false to stop streaming early.
      */
-    async translateStream(request, onBatch) {
-        const url = `${this.baseUrl}/api/v1/translate/TranslationService/TranslateStream`;
-        // For gRPC-Web streaming over HTTP, we use POST with streaming response
-        const response = await this.fetchWithTimeout(url, {
-            method: 'POST',
-            body: JSON.stringify(request),
-            headers: this.getHeaders()
+    translateStream(request, onBatch) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Use persistent connection with multiplexing
+            yield this.sendPersistentRequest('TranslationService/TranslateStream', request, (data) => onBatch(data));
         });
-        if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`HTTP ${response.status}: ${text}`);
-        }
-        if (!response.body) {
-            throw new Error('No response body for streaming request');
-        }
-        const decoder = new TextDecoder();
-        // Handle both browser ReadableStream and Node.js stream from node-fetch
-        // Check for Node.js stream first (node-fetch v2 uses Node.js streams)
-        if ('on' in response.body && typeof response.body.on === 'function') {
-            // Node.js Stream (for testing)
-            await new Promise((resolve, reject) => {
-                let buffer = '';
-                response.body.on('data', (chunk) => {
-                    buffer += chunk.toString();
-                    const lines = buffer.split('\n').filter(line => line.trim().length > 0);
-                    // Keep incomplete line in buffer
-                    if (!buffer.endsWith('\n')) {
-                        buffer = lines.pop() || '';
-                    }
-                    else {
-                        buffer = '';
-                    }
-                    for (const line of lines) {
-                        try {
-                            const data = JSON.parse(line);
-                            const shouldContinue = onBatch(data);
-                            if (shouldContinue === false) {
-                                response.body.destroy();
-                                resolve();
-                                return;
-                            }
-                        }
-                        catch (e) {
-                            console.warn('Failed to parse streaming chunk:', line, e);
-                        }
-                    }
-                });
-                response.body.on('end', () => {
-                    // Process any remaining data
-                    if (buffer.trim().length > 0) {
-                        try {
-                            const data = JSON.parse(buffer.trim());
-                            onBatch(data);
-                        }
-                        catch (e) {
-                            console.warn('Failed to parse final chunk:', buffer, e);
-                        }
-                    }
-                    resolve();
-                });
-                response.body.on('error', (err) => {
-                    reject(err);
-                });
-            });
-        }
-        else if ('getReader' in response.body && typeof response.body.getReader === 'function') {
-            // Browser ReadableStream (whatwg streams)
-            const reader = response.body.getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                    break;
-                }
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n').filter(line => line.trim().length > 0);
-                for (const line of lines) {
-                    try {
-                        const data = JSON.parse(line);
-                        const shouldContinue = onBatch(data);
-                        if (shouldContinue === false) {
-                            reader.cancel();
-                            return;
-                        }
-                    }
-                    catch (e) {
-                        console.warn('Failed to parse streaming chunk:', line, e);
-                    }
-                }
-            }
-        }
-        else {
-            throw new Error('Unsupported response body stream type');
-        }
     }
     /**
      * Collect all streaming responses into an array
      * @param request Request parameters
      */
-    async translateStreamCollect(request) {
-        const result = [];
-        await this.translateStream(request, (response) => {
-            result.push(response);
-            return true;
+    translateStreamCollect(request) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const result = [];
+            yield this.translateStream(request, (response) => {
+                result.push(response);
+                return true;
+            });
+            return result;
         });
-        return result;
     }
     /**
      * LLMTranslate - One-shot large language model translation
@@ -1085,34 +1461,36 @@ export class TranslationClient {
      * @param request Translation request
      * @param skipCache If true, bypass cache and always request from backend
      */
-    async llmTranslate(request, skipCache = false) {
-        const cacheKey = generateCacheKey(request);
-        // Check cache first
-        if (this.llmCacheEnabled && !skipCache) {
-            const cached = this.llmCache.get(cacheKey);
-            if (cached) {
-                // Return cached response with cached flag set
-                return Object.assign(Object.assign({}, cached), { cached: true });
+    llmTranslate(request_1) {
+        return __awaiter(this, arguments, void 0, function* (request, skipCache = false) {
+            const cacheKey = generateCacheKey(request);
+            // Check cache first
+            if (this.llmCacheEnabled && !skipCache) {
+                const cached = this.llmCache.get(cacheKey);
+                if (cached) {
+                    // Return cached response with cached flag set
+                    return Object.assign(Object.assign({}, cached), { cached: true });
+                }
             }
-        }
-        // Request from backend using gRPC-web streaming LLMTranslateStream
-        let finalResponse = null;
-        await this.llmTranslateStream(request, (response) => {
-            finalResponse = response;
-            // Continue until finished
-            return !response.finished;
+            // Request from backend using gRPC-web streaming LLMTranslateStream
+            let finalResponse = null;
+            yield this.llmTranslateStream(request, (response) => {
+                finalResponse = response;
+                // Continue until finished
+                return !response.finished;
+            });
+            if (!finalResponse) {
+                throw new Error('No response received from streaming translation');
+            }
+            // Cache the response
+            if (this.llmCacheEnabled && finalResponse.translatedText) {
+                const cachedResponse = Object.assign(Object.assign({}, finalResponse), { cached: true });
+                this.llmCache.set(cacheKey, cachedResponse);
+                // Broadcast to other tabs and save to localStorage
+                this.broadcastCacheUpdate(cacheKey, cachedResponse);
+            }
+            return Object.assign(Object.assign({}, finalResponse), { cached: false });
         });
-        if (!finalResponse) {
-            throw new Error('No response received from streaming translation');
-        }
-        // Cache the response
-        if (this.llmCacheEnabled && finalResponse.translatedText) {
-            const cachedResponse = Object.assign(Object.assign({}, finalResponse), { cached: true });
-            this.llmCache.set(cacheKey, cachedResponse);
-            // Broadcast to other tabs and save to localStorage
-            this.broadcastCacheUpdate(cacheKey, cachedResponse);
-        }
-        return Object.assign(Object.assign({}, finalResponse), { cached: false });
     }
     // ========== High-level translation API ==========
     /**
@@ -1130,9 +1508,11 @@ export class TranslationClient {
      * @param fingerprint Optional specific fingerprint for this translation (overrides client-level fingerprint)
      * @returns Translated text
      */
-    async translate(text, toLang, fromLang, fingerprint) {
-        const response = await this.translateWithDetails(text, toLang, fromLang, fingerprint);
-        return response.translatedText;
+    translate(text, toLang, fromLang, fingerprint) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const response = yield this.translateWithDetails(text, toLang, fromLang, fingerprint);
+            return response.translatedText;
+        });
     }
     /**
      * Translate text with full response details
@@ -1142,74 +1522,147 @@ export class TranslationClient {
      * @param fingerprint Optional specific fingerprint for this translation (overrides client-level fingerprint)
      * @returns Full translation response
      */
-    async translateWithDetails(text, toLang, fromLang, fingerprint) {
-        // Auto-initialize if not initialized yet
-        if (!this.initialized && !this.initPromise) {
-            this.initPromise = this.initialize();
-        }
-        // Check if pool is currently loading
-        const isPoolLoading = this.pool.isLoading();
-        // If pool is loading, use observer pattern to queue request and return original immediately
-        if (isPoolLoading) {
-            console.log(`[TranslationClient] Pool is loading, using fast fallback for: "${text}"`);
-            return this.pool.queueTranslationRequest({ text, toLang, fromLang, fingerprint });
-        }
-        // Wait for initialization to complete if still in progress
-        if (this.initPromise) {
-            await this.initPromise;
-            this.initPromise = null;
-            this.initialized = true;
-        }
-        // If specific fingerprint provided and not loaded yet, load it first
-        if (fingerprint && !this.pool.isLoaded(fingerprint)) {
-            await this.pool.loadFingerprintIfNotLoaded(fingerprint);
-        }
-        // Check pre-loaded translation pool first
-        const lookup = this.pool.lookup(text, fingerprint);
-        if (lookup.found) {
-            return {
-                originalText: text,
-                translatedText: lookup.translation,
-                provider: 'preloaded',
-                timestamp: Date.now(),
-                finished: true,
-                cached: true,
-                fromLang,
-                toLang
-            };
-        }
-        // Not found in pool - request from backend via TranslateStream
-        // This will automatically call LLM if translation doesn't exist in database
-        return new Promise((resolve, reject) => {
-            this.translateStream({
-                senseId: this.config.senseId,
-                fingerprint,
-                text,
-                from_lang: fromLang,
-                to_lang: toLang
-            }, (response) => {
-                // Check if we got a translation
-                if (response.translation && response.translation[text]) {
-                    resolve({
-                        originalText: text,
-                        translatedText: response.translation[text],
-                        provider: 'translate-stream',
-                        timestamp: response.timestamp,
-                        finished: response.finished,
-                        cached: false,
-                        fromLang,
-                        toLang
-                    });
-                    return false; // Stop streaming
+    translateWithDetails(text, toLang, fromLang, fingerprint) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Capture the current language version at the start of this request
+            // This will be used to validate the response later
+            const requestLanguageVersion = this.languageVersion;
+            // Detect language change - if target language changed
+            if (this.currentToLang && this.currentToLang !== toLang) {
+                console.log(`[TranslationClient] Language changed from "${this.currentToLang}" to "${toLang}"`);
+                // Cancel in-flight requests by aborting current controller
+                if (this.currentAbortController) {
+                    this.currentAbortController.abort();
                 }
-                // Check for error
-                if (response.translation && response.translation['error']) {
-                    reject(new Error(response.translation['error']));
-                    return false;
+                // Increment language version to invalidate all in-flight requests
+                this.languageVersion++;
+                // Sync language version with pool for validation
+                this.pool.setLanguageVersion(this.languageVersion);
+                // Clear queued requests for the old language
+                this.pool.clearQueuedRequests();
+                // Check if target language is already loaded - if so, just switch
+                // No need to clear all caches - different languages are cached separately
+                const isLanguageLoaded = this.pool.isLanguageLoaded(toLang);
+                const isCommonLoaded = this.pool.isLanguageLoaded('common', toLang);
+                if (!isLanguageLoaded || !isCommonLoaded) {
+                    // Need to load the new language - will be done below
+                    console.log(`[TranslationClient] Language "${toLang}" not loaded yet, will load in background`);
                 }
-                // Continue if not finished
-                return !response.finished;
-            }).catch(reject);
+                this.initialized = false;
+                this.initPromise = null;
+            }
+            this.currentToLang = toLang;
+            // Sync target language with pool for validation
+            this.pool.setToLang(toLang);
+            // Check if this language is already loaded
+            const isLanguageLoaded = this.pool.isLanguageLoaded(fingerprint || this.currentFingerprint || 'common', toLang);
+            const isCommonLoaded = this.pool.isLanguageLoaded('common', toLang);
+            // Auto-initialize if not initialized yet OR if this language is not loaded
+            if ((!this.initialized && !this.initPromise) || (!isLanguageLoaded || !isCommonLoaded)) {
+                // Check if we already have a pending init for this language
+                if (!this.initPromise) {
+                    this.initPromise = this.initialize(toLang);
+                }
+            }
+            // Check if pool is currently loading
+            const isPoolLoading = this.pool.isLoading();
+            // If pool is loading, use observer pattern to queue request and return original immediately
+            if (isPoolLoading) {
+                console.log(`[TranslationClient] Pool is loading, using fast fallback for: "${text}"`);
+                return this.pool.queueTranslationRequest({ text, toLang, fromLang, fingerprint });
+            }
+            // Wait for initialization to complete if still in progress
+            if (this.initPromise) {
+                yield this.initPromise;
+                this.initPromise = null;
+                this.initialized = true;
+            }
+            // If specific fingerprint provided and not loaded yet for this language, load it first
+            const fp = fingerprint || this.currentFingerprint || 'common';
+            if (fp && !this.pool.isLoaded(fp, toLang)) {
+                yield this.pool.loadFingerprintIfNotLoaded(fp, toLang);
+            }
+            // Check pre-loaded translation pool first (now includes language)
+            const lookup = this.pool.lookup(text, fingerprint, toLang);
+            if (lookup.found) {
+                return {
+                    originalText: text,
+                    translatedText: lookup.translation,
+                    provider: 'preloaded',
+                    timestamp: Date.now(),
+                    finished: true,
+                    cached: true,
+                    fromLang,
+                    toLang
+                };
+            }
+            // Not found in pool - request from backend via TranslateStream
+            // This will automatically call LLM if translation doesn't exist in database
+            // Create a new AbortController for this request
+            const abortController = new AbortController();
+            this.currentAbortController = abortController;
+            return new Promise((resolve, reject) => {
+                // Check if language has changed since this request started
+                if (this.languageVersion !== requestLanguageVersion) {
+                    console.log(`[TranslationClient] Language changed during request, discarding response for: "${text}"`);
+                    reject(new Error('Language changed during request'));
+                    return;
+                }
+                this.translateStream({
+                    senseId: this.config.senseId,
+                    fingerprint,
+                    text,
+                    from_lang: fromLang,
+                    to_lang: toLang
+                }, (response) => {
+                    // Check if request was aborted
+                    if (abortController.signal.aborted) {
+                        console.log(`[TranslationClient] Request aborted for: "${text}"`);
+                        reject(new Error('Request aborted'));
+                        return false;
+                    }
+                    // Check if language has changed during streaming
+                    if (this.languageVersion !== requestLanguageVersion) {
+                        console.log(`[TranslationClient] Language changed during streaming for: "${text}"`);
+                        reject(new Error('Language changed during request'));
+                        return false;
+                    }
+                    // Check if we got a translation
+                    if (response.translation && response.translation[text]) {
+                        const translatedText = response.translation[text];
+                        // Validate language version before adding to pool
+                        if (this.languageVersion === requestLanguageVersion) {
+                            // Add to pool with current language version and toLang for validation
+                            this.pool.addTranslation(text, translatedText, fingerprint, this.languageVersion, toLang);
+                        }
+                        resolve({
+                            originalText: text,
+                            translatedText: translatedText,
+                            provider: 'translate-stream',
+                            timestamp: response.timestamp,
+                            finished: response.finished,
+                            cached: false,
+                            fromLang,
+                            toLang
+                        });
+                        return false; // Stop streaming
+                    }
+                    // Check for error
+                    if (response.translation && response.translation['error']) {
+                        reject(new Error(response.translation['error']));
+                        return false;
+                    }
+                    // Continue if not finished
+                    return !response.finished;
+                }).catch((err) => {
+                    // Don't reject if aborted
+                    if (abortController.signal.aborted) {
+                        console.log(`[TranslationClient] Request aborted for: "${text}"`);
+                        return;
+                    }
+                    reject(err);
+                });
+            });
         });
     }
     /**
@@ -1220,26 +1673,28 @@ export class TranslationClient {
      * @param fingerprint Optional specific fingerprint for this translation
      * @returns Translated text
      */
-    async translateNoCache(text, toLang, fromLang, fingerprint) {
-        // Use TranslateStream which will automatically call LLM if needed
-        return new Promise((resolve, reject) => {
-            this.translateStream({
-                senseId: this.config.senseId,
-                fingerprint,
-                text,
-                from_lang: fromLang,
-                to_lang: toLang
-            }, (response) => {
-                if (response.translation && response.translation[text]) {
-                    resolve(response.translation[text]);
-                    return false;
-                }
-                if (response.translation && response.translation['error']) {
-                    reject(new Error(response.translation['error']));
-                    return false;
-                }
-                return !response.finished;
-            }).catch(reject);
+    translateNoCache(text, toLang, fromLang, fingerprint) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Use TranslateStream which will automatically call LLM if needed
+            return new Promise((resolve, reject) => {
+                this.translateStream({
+                    senseId: this.config.senseId,
+                    fingerprint,
+                    text,
+                    from_lang: fromLang,
+                    to_lang: toLang
+                }, (response) => {
+                    if (response.translation && response.translation[text]) {
+                        resolve(response.translation[text]);
+                        return false;
+                    }
+                    if (response.translation && response.translation['error']) {
+                        reject(new Error(response.translation['error']));
+                        return false;
+                    }
+                    return !response.finished;
+                }).catch(reject);
+            });
         });
     }
     /**
@@ -1250,29 +1705,36 @@ export class TranslationClient {
      * @param fingerprint Optional specific fingerprint for all translations in this batch
      * @returns Array of translated texts in same order
      */
-    async translateBatch(texts, toLang, fromLang, fingerprint) {
-        const results = await Promise.all(texts.map(text => this.translate(text, toLang, fromLang, fingerprint)));
-        return results;
+    translateBatch(texts, toLang, fromLang, fingerprint) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const results = yield Promise.all(texts.map(text => this.translate(text, toLang, fromLang, fingerprint)));
+            return results;
+        });
     }
     /**
-     * Initialize and preload all translations
+     * Initialize and preload all translations for a given target language
      * Call this to warm up cache before translating
      */
-    async preload() {
-        if (!this.initialized && !this.initPromise) {
-            this.initPromise = this.initialize();
-            await this.initPromise;
-            this.initPromise = null;
-            this.initialized = true;
-        }
+    preload(toLang) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.initialized && !this.initPromise) {
+                this.initPromise = this.initialize(toLang);
+                yield this.initPromise;
+                this.initPromise = null;
+                this.initialized = true;
+            }
+        });
     }
     /**
-     * Internal initialization - preloads translations via streaming
+     * Internal initialization - preloads translations via streaming for a specific language
+     * @param toLang Target language for initialization (required)
      */
-    async initialize() {
-        if (this.llmCacheEnabled) {
-            await this.pool.initialize();
-        }
+    initialize(toLang) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.llmCacheEnabled) {
+                yield this.pool.initialize(toLang);
+            }
+        });
     }
     /**
      * Check if service is initialized
@@ -1286,12 +1748,14 @@ export class TranslationClient {
      * Automatically loads special translations for this fingerprint
      * @param fingerprint The fingerprint to use
      */
-    async setFingerprint(fingerprint) {
-        if (this.currentFingerprint === fingerprint) {
-            return;
-        }
-        this.currentFingerprint = fingerprint;
-        await this.pool.switchFingerprint(fingerprint);
+    setFingerprint(fingerprint) {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (this.currentFingerprint === fingerprint) {
+                return;
+            }
+            this.currentFingerprint = fingerprint;
+            yield this.pool.switchFingerprint(fingerprint);
+        });
     }
     /**
      * Clear the current fingerprint
@@ -1316,53 +1780,93 @@ export class TranslationClient {
         return this.llmCacheEnabled;
     }
     /**
-     * Check if a translation exists in pre-loaded pool
+     * Check if a translation exists in pre-loaded pool for a specific language
      * @param text Text to check
      * @param fingerprint Optional specific fingerprint to check
+     * @param toLang Target language to check (uses currentToLang if not provided)
      * @returns true if translation exists in cache
      */
-    hasTranslation(text, fingerprint) {
-        return this.pool.lookup(text, fingerprint).found;
+    hasTranslation(text, fingerprint, toLang) {
+        const lang = toLang || this.currentToLang || 'en';
+        return this.pool.lookup(text, fingerprint, lang).found;
     }
     /**
      * Get translation from pre-loaded cache without requesting from backend
      * @param text Text to look up
      * @param fingerprint Optional specific fingerprint to look up
+     * @param toLang Target language to look up (uses currentToLang if not provided)
      * @returns Translation if found, null otherwise
      */
-    getCached(text, fingerprint) {
-        const result = this.pool.lookup(text, fingerprint);
+    getCached(text, fingerprint, toLang) {
+        const lang = toLang || this.currentToLang || 'en';
+        const result = this.pool.lookup(text, fingerprint, lang);
         return result.found ? result.translation : null;
     }
     /**
-     * Add a custom translation to the pre-loaded pool
+     * Add a custom translation to the pre-loaded pool for a specific language
      * @param text Original text
      * @param translation Translated text
      * @param fingerprint Optional specific fingerprint to add to
+     * @param toLang Target language (uses currentToLang if not provided)
      */
-    addTranslation(text, translation, fingerprint) {
+    addTranslation(text, translation, fingerprint, toLang) {
         if (this.llmCacheEnabled) {
-            this.pool.addTranslation(text, translation, fingerprint);
+            const lang = toLang || this.currentToLang || 'en';
+            this.pool.addTranslation(text, translation, fingerprint, undefined, lang);
         }
     }
     /**
      * Clear all cached translations
      */
     clearAllCache() {
+        // Increment language version to invalidate all pending translations
+        this.languageVersion++;
+        // Sync language version with pool
+        this.pool.setLanguageVersion(this.languageVersion);
+        // Reset target language in pool
+        this.pool.setToLang('');
         this.pool.clearAll();
         this.pool.clearQueuedRequests(); // Clear waiting translation requests too
         this.clearCache(); // Clear LLM cache too
+        // Reset current toLang
+        this.currentToLang = null;
+    }
+    /**
+     * Check if a specific language has been loaded
+     * @param toLang Target language to check
+     * @returns true if the language has been loaded
+     */
+    isLanguageLoaded(toLang) {
+        return this.pool.isLanguageLoaded(toLang);
+    }
+    /**
+     * Get all loaded languages
+     * @returns Array of loaded language codes
+     */
+    getLoadedLanguages() {
+        return this.pool.getLoadedLanguages();
+    }
+    /**
+     * Clear cached data for a specific language only
+     * Preserves caches for other languages
+     * @param toLang Target language to clear
+     */
+    clearLanguage(toLang) {
+        this.pool.clearLanguage(toLang);
     }
     /**
      * Destroy the instance and free resources
      * Call this when the instance is no longer needed
      */
     destroy() {
+        this.shouldReconnect = false;
+        this.closePersistentConnection();
         this.pool.destroy();
         if (this.broadcastChannel) {
             this.broadcastChannel.close();
             this.broadcastChannel = null;
         }
+        this.pendingRequests.clear();
     }
     /**
      * LLMTranslateStream - Streaming large language model translation
@@ -1370,98 +1874,163 @@ export class TranslationClient {
      * @param request Translation request
      * @param onResponse Callback for each response chunk
      */
-    async llmTranslateStream(request, onResponse) {
-        const url = `${this.baseUrl}/api/v1/translate/TranslationService/LLMTranslateStream`;
-        const response = await this.fetchWithTimeout(url, {
-            method: 'POST',
-            body: JSON.stringify(request),
-            headers: this.getHeaders()
+    llmTranslateStream(request, onResponse) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // Use persistent connection with multiplexing
+            yield this.sendPersistentRequest('TranslationService/LLMTranslateStream', request, (data) => onResponse(data));
         });
-        if (!response.ok) {
-            const text = await response.text();
-            throw new Error(`HTTP ${response.status}: ${text}`);
+    }
+    // ========== Persistent Connection Management ==========
+    /**
+     * Ensure the persistent connection is connected and ready
+     */
+    ensureConnected() {
+        if (this.connectionState === 'connected') {
+            return Promise.resolve();
         }
-        if (!response.body) {
-            throw new Error('No response body for streaming request');
+        if (this.connectionState === 'connecting' && this.connectPromise) {
+            return this.connectPromise;
         }
-        const decoder = new TextDecoder();
-        // Handle both browser ReadableStream and Node.js stream from node-fetch
-        // Check for Node.js stream first (node-fetch v2 uses Node.js streams)
-        if ('on' in response.body && typeof response.body.on === 'function') {
-            // Node.js Stream (for testing)
-            await new Promise((resolve, reject) => {
-                let buffer = '';
-                response.body.on('data', (chunk) => {
-                    buffer += chunk.toString();
-                    const lines = buffer.split('\n').filter(line => line.trim().length > 0);
-                    // Keep incomplete line in buffer
-                    if (!buffer.endsWith('\n')) {
-                        buffer = lines.pop() || '';
-                    }
-                    else {
-                        buffer = '';
-                    }
-                    for (const line of lines) {
-                        try {
-                            const data = JSON.parse(line);
-                            const shouldContinue = onResponse(data);
-                            if (shouldContinue === false) {
-                                response.body.destroy();
-                                resolve();
-                                return;
-                            }
-                        }
-                        catch (e) {
-                            console.warn('Failed to parse streaming chunk:', line, e);
-                        }
-                    }
-                });
-                response.body.on('end', () => {
-                    // Process any remaining data
-                    if (buffer.trim().length > 0) {
-                        try {
-                            const data = JSON.parse(buffer.trim());
-                            onResponse(data);
-                        }
-                        catch (e) {
-                            console.warn('Failed to parse final chunk:', buffer, e);
-                        }
-                    }
-                    resolve();
-                });
-                response.body.on('error', (err) => {
-                    reject(err);
-                });
-            });
-        }
-        else if ('getReader' in response.body && typeof response.body.getReader === 'function') {
-            // Browser ReadableStream (whatwg streams)
-            const reader = response.body.getReader();
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                    break;
+        this.connectionState = 'connecting';
+        this.connectPromise = new Promise((resolve, reject) => {
+            this.connectPersistentConnection(resolve, reject);
+        });
+        return this.connectPromise;
+    }
+    /**
+     * Connect the persistent EventSource connection
+     */
+    connectPersistentConnection(resolve, reject) {
+        const eventSourceUrl = new URL(`${this.baseUrl}/stream`);
+        // Add auth token as query parameter for EventSource (since EventSource doesn't support headers)
+        eventSourceUrl.searchParams.set('token', this.token);
+        const eventSource = new EventSource(eventSourceUrl.toString());
+        this.persistentConnection = eventSource;
+        let connectionResolved = false;
+        eventSource.onopen = () => {
+            console.log('[TranslationClient] Persistent connection established');
+            this.connectionState = 'connected';
+            this.reconnectDelay = 1000; // Reset reconnect delay on successful connection
+            connectionResolved = true;
+            resolve();
+        };
+        eventSource.onerror = (error) => {
+            console.error('[TranslationClient] Persistent connection error:', error);
+            if (!connectionResolved) {
+                this.connectionState = 'disconnected';
+                this.persistentConnection = null;
+                connectionResolved = true;
+                reject(new Error('Failed to establish persistent connection'));
+                return;
+            }
+            // Connection dropped - schedule reconnect
+            this.handleDisconnection();
+        };
+        // Handle incoming messages - format: {"id": "req-123", "data": {...}, "finished": true}
+        eventSource.onmessage = (event) => {
+            try {
+                const message = JSON.parse(event.data);
+                const { id, data, finished, error } = message;
+                const pending = this.pendingRequests.get(id);
+                if (!pending) {
+                    return; // No pending request for this ID - ignore
                 }
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n').filter(line => line.trim().length > 0);
-                for (const line of lines) {
-                    try {
-                        const data = JSON.parse(line);
-                        const shouldContinue = onResponse(data);
-                        if (shouldContinue === false) {
-                            reader.cancel();
-                            return;
-                        }
+                if (error) {
+                    pending.onError(new Error(error));
+                    this.pendingRequests.delete(id);
+                    return;
+                }
+                if (data) {
+                    const shouldContinue = pending.onMessage(data);
+                    if (shouldContinue === false) {
+                        // Client requested to stop streaming
+                        this.pendingRequests.delete(id);
+                        pending.onComplete();
                     }
-                    catch (e) {
-                        console.warn('Failed to parse streaming chunk:', line, e);
-                    }
+                }
+                if (finished) {
+                    this.pendingRequests.delete(id);
+                    pending.onComplete();
                 }
             }
+            catch (e) {
+                console.warn('[TranslationClient] Failed to parse incoming message:', event.data, e);
+            }
+        };
+    }
+    /**
+     * Handle connection disconnection and schedule reconnect
+     */
+    handleDisconnection() {
+        this.connectionState = 'disconnected';
+        this.persistentConnection = null;
+        // Reject all pending requests
+        this.pendingRequests.forEach((pending) => {
+            pending.onError(new Error('Connection closed'));
+        });
+        this.pendingRequests.clear();
+        // Try to reconnect if we should
+        if (this.shouldReconnect) {
+            console.log(`[TranslationClient] Reconnecting in ${this.reconnectDelay}ms...`);
+            setTimeout(() => {
+                if (this.shouldReconnect && this.connectionState === 'disconnected') {
+                    this.ensureConnected().catch(() => {
+                        // Reconnect failed - exponential backoff
+                        this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
+                    });
+                }
+            }, this.reconnectDelay);
         }
-        else {
-            throw new Error('Unsupported response body type');
+    }
+    /**
+     * Close the persistent connection
+     */
+    closePersistentConnection() {
+        if (this.persistentConnection) {
+            this.persistentConnection.close();
+            this.persistentConnection = null;
         }
+        this.connectionState = 'disconnected';
+    }
+    /**
+     * Send a request over the persistent connection
+     * @param method The method name to call
+     * @param request The request body
+     * @param onMessage Callback for each message received
+     * @returns Promise that resolves when streaming is complete
+     */
+    sendPersistentRequest(method, request, onMessage) {
+        return new Promise((resolve, reject) => __awaiter(this, void 0, void 0, function* () {
+            try {
+                // Ensure we're connected
+                yield this.ensureConnected();
+                // Generate a unique request ID
+                const requestId = `req-${this.nextRequestId++}`;
+                // Store the callbacks
+                this.pendingRequests.set(requestId, {
+                    onMessage,
+                    onComplete: resolve,
+                    onError: reject
+                });
+                // Send the request over the persistent connection
+                // We use a separate fetch POST to send the request to the server
+                // Server will route responses back through EventSource connection
+                const url = `${this.baseUrl}/${method}`;
+                const response = yield fetch(url, {
+                    method: 'POST',
+                    body: JSON.stringify(Object.assign(Object.assign({}, request), { requestId })),
+                    headers: this.getHeaders()
+                });
+                if (!response.ok) {
+                    const text = yield response.text();
+                    throw new Error(`HTTP ${response.status}: ${text}`);
+                }
+                // Request accepted - response will come back via EventSource
+            }
+            catch (error) {
+                reject(error);
+            }
+        }));
     }
     getHeaders() {
         const headers = {
@@ -1475,23 +2044,27 @@ export class TranslationClient {
         }
         return headers;
     }
-    async fetchJson(url, body) {
-        const response = await this.fetchWithTimeout(url, {
-            method: 'POST',
-            body: JSON.stringify(body),
-            headers: this.getHeaders()
+    fetchJson(url, body) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const response = yield this.fetchWithTimeout(url, {
+                method: 'POST',
+                body: JSON.stringify(body),
+                headers: this.getHeaders()
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            return yield response.json();
         });
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        return await response.json();
     }
-    async fetchWithTimeout(url, options) {
-        const controller = new AbortController();
-        const id = setTimeout(() => controller.abort(), this.timeout);
-        const response = await fetch(url, Object.assign(Object.assign({}, options), { signal: controller.signal }));
-        clearTimeout(id);
-        return response;
+    fetchWithTimeout(url, options) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), this.timeout);
+            const response = yield fetch(url, Object.assign(Object.assign({}, options), { signal: controller.signal }));
+            clearTimeout(id);
+            return response;
+        });
     }
     /**
      * Get cache statistics for both pre-loaded translations and LLM translations
