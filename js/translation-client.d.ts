@@ -153,14 +153,82 @@ export declare class TranslationClient {
     private currentFingerprint;
     private initialized;
     private initPromise;
+    private currentToLang;
+    private languageVersion;
+    private currentAbortController;
     private broadcastChannel;
     private crossTabOptions;
     private storageKey;
+    private persistentConnection;
+    private connectionState;
+    private pendingRequests;
+    private nextRequestId;
+    private connectPromise;
+    private reconnectDelay;
+    private maxReconnectDelay;
+    private shouldReconnect;
+    onTranslationUpdated: ((text: string, translation: string) => void) | null;
+    onPoolInitialized: (() => void) | null;
+    onQueueProcessed: ((count: number) => void) | null;
+    private translationUpdatedSubscribers;
+    private poolInitializedSubscribers;
+    private queueProcessedSubscribers;
     /**
      * Create a new TranslationClient - the only entry point you need
      * @param config Client configuration
      */
     constructor(config: TranslationClientConfig);
+    /**
+     * Set up callbacks to forward TranslationPool events to TranslationClient subscribers
+     */
+    private setupReactiveCallbacks;
+    /**
+     * Subscribe to translation update events
+     * Called when a new translation is added to the pool
+     * @param callback Function called with (text, translation) when translation is updated
+     * @returns Unsubscribe function
+     */
+    subscribeTranslationUpdated(callback: (text: string, translation: string) => void): () => void;
+    /**
+     * Unsubscribe from translation update events
+     * @param callback The callback to remove
+     */
+    unsubscribeTranslationUpdated(callback: (text: string, translation: string) => void): void;
+    /**
+     * Subscribe to pool initialization complete events
+     * @param callback Function called when pool is fully initialized
+     * @returns Unsubscribe function
+     */
+    subscribePoolInitialized(callback: () => void): () => void;
+    /**
+     * Unsubscribe from pool initialization events
+     * @param callback The callback to remove
+     */
+    unsubscribePoolInitialized(callback: () => void): void;
+    /**
+     * Subscribe to queue processed events
+     * Called when queued translation requests are processed
+     * @param callback Function called with the count of processed requests
+     * @returns Unsubscribe function
+     */
+    subscribeQueueProcessed(callback: (count: number) => void): () => void;
+    /**
+     * Unsubscribe from queue processed events
+     * @param callback The callback to remove
+     */
+    unsubscribeQueueProcessed(callback: (count: number) => void): void;
+    /**
+     * Notify all subscribers when a translation is updated
+     */
+    private notifyTranslationUpdated;
+    /**
+     * Notify all subscribers when pool is initialized
+     */
+    private notifyPoolInitialized;
+    /**
+     * Notify all subscribers when queue is processed
+     */
+    private notifyQueueProcessed;
     /**
      * Initialize cross-tab synchronization via Broadcast Channel
      */
@@ -275,12 +343,13 @@ export declare class TranslationClient {
      */
     translateBatch(texts: string[], toLang: string, fromLang?: string, fingerprint?: string): Promise<string[]>;
     /**
-     * Initialize and preload all translations
+     * Initialize and preload all translations for a given target language
      * Call this to warm up cache before translating
      */
-    preload(): Promise<void>;
+    preload(toLang: string): Promise<void>;
     /**
-     * Internal initialization - preloads translations via streaming
+     * Internal initialization - preloads translations via streaming for a specific language
+     * @param toLang Target language for initialization (required)
      */
     private initialize;
     /**
@@ -308,30 +377,50 @@ export declare class TranslationClient {
      */
     isCacheEnabled(): boolean;
     /**
-     * Check if a translation exists in pre-loaded pool
+     * Check if a translation exists in pre-loaded pool for a specific language
      * @param text Text to check
      * @param fingerprint Optional specific fingerprint to check
+     * @param toLang Target language to check (uses currentToLang if not provided)
      * @returns true if translation exists in cache
      */
-    hasTranslation(text: string, fingerprint?: string): boolean;
+    hasTranslation(text: string, fingerprint?: string, toLang?: string): boolean;
     /**
      * Get translation from pre-loaded cache without requesting from backend
      * @param text Text to look up
      * @param fingerprint Optional specific fingerprint to look up
+     * @param toLang Target language to look up (uses currentToLang if not provided)
      * @returns Translation if found, null otherwise
      */
-    getCached(text: string, fingerprint?: string): string | null;
+    getCached(text: string, fingerprint?: string, toLang?: string): string | null;
     /**
-     * Add a custom translation to the pre-loaded pool
+     * Add a custom translation to the pre-loaded pool for a specific language
      * @param text Original text
      * @param translation Translated text
      * @param fingerprint Optional specific fingerprint to add to
+     * @param toLang Target language (uses currentToLang if not provided)
      */
-    addTranslation(text: string, translation: string, fingerprint?: string): void;
+    addTranslation(text: string, translation: string, fingerprint?: string, toLang?: string): void;
     /**
      * Clear all cached translations
      */
     clearAllCache(): void;
+    /**
+     * Check if a specific language has been loaded
+     * @param toLang Target language to check
+     * @returns true if the language has been loaded
+     */
+    isLanguageLoaded(toLang: string): boolean;
+    /**
+     * Get all loaded languages
+     * @returns Array of loaded language codes
+     */
+    getLoadedLanguages(): string[];
+    /**
+     * Clear cached data for a specific language only
+     * Preserves caches for other languages
+     * @param toLang Target language to clear
+     */
+    clearLanguage(toLang: string): void;
     /**
      * Destroy the instance and free resources
      * Call this when the instance is no longer needed
@@ -344,6 +433,30 @@ export declare class TranslationClient {
      * @param onResponse Callback for each response chunk
      */
     llmTranslateStream(request: LLMTranslateRequest, onResponse: (response: LLMTranslateResponse) => boolean | void): Promise<void>;
+    /**
+     * Ensure the persistent connection is connected and ready
+     */
+    private ensureConnected;
+    /**
+     * Connect the persistent EventSource connection
+     */
+    private connectPersistentConnection;
+    /**
+     * Handle connection disconnection and schedule reconnect
+     */
+    private handleDisconnection;
+    /**
+     * Close the persistent connection
+     */
+    private closePersistentConnection;
+    /**
+     * Send a request over the persistent connection
+     * @param method The method name to call
+     * @param request The request body
+     * @param onMessage Callback for each message received
+     * @returns Promise that resolves when streaming is complete
+     */
+    private sendPersistentRequest;
     private getHeaders;
     private fetchJson;
     private fetchWithTimeout;
