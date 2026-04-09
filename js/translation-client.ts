@@ -40,6 +40,10 @@ export interface TranslateStreamRequest {
   from_lang?: string;
   // 目标语言，必填，用于LLM翻译
   to_lang?: string;
+  // 源语言过滤，可选，只返回指定源语言的翻译
+  src_lang?: string;
+  // 目标语言过滤，可选，只返回指定目标语言的翻译（预加载翻译池必填）
+  dst_lang?: string;
 }
 
 export interface TranslateStreamResponse {
@@ -794,6 +798,7 @@ class TranslationPool {
         senseId: this.senseId,
         fingerprint,
         to_lang: toLang,
+        dst_lang: toLang,
         batchSize: 500
       },
       (response) => {
