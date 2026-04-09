@@ -2393,13 +2393,39 @@ export class TranslationClient {
 
     let connectionResolved = false;
 
-    eventSource.onopen = () => {
-      console.log('[TranslationClient] Persistent connection established');
-      this.connectionState = 'connected';
-      this.reconnectDelay = 1000; // Reset reconnect delay on successful connection
-      connectionResolved = true;
-      resolve();
-    };
+      // Resolve connection immediately when EventSource is created in Node.js environment
+      // Node.js eventsource library doesn't trigger onopen on initial connection
+      // Use any type to avoid TypeScript errors in different environments
+      let isNode = false;
+      try {
+        // This detection method works everywhere: browser, Node.js, different JS environments
+        // Access via globalThis to avoid TypeScript errors about missing 'process'
+        const gt: any = globalThis;
+        if (gt.process && gt.process.versions && gt.process.versions.node) {
+          isNode = true;
+        }
+      } catch (e) {
+        isNode = false;
+      }
+      
+      if (isNode) {
+        console.log('[TranslationClient] Persistent connection established (Node.js)');
+        this.connectionState = 'connected';
+        this.reconnectDelay = 1000;
+        connectionResolved = true;
+        resolve();
+      }
+
+      eventSource.onopen = () => {
+        if (connectionResolved) {
+          return;
+        }
+        console.log('[TranslationClient] Persistent connection established');
+        this.connectionState = 'connected';
+        this.reconnectDelay = 1000; // Reset reconnect delay on successful connection
+        connectionResolved = true;
+        resolve();
+      };
 
     eventSource.onerror = (error) => {
       console.error('[TranslationClient] Persistent connection error:', error);
