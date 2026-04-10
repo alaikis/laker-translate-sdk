@@ -20,6 +20,7 @@ export interface GetSenseTranslateRequest {
   pageSize?: number;
   src_lang?: string;
   dst_lang?: string;
+  dst_langs?: string[];
 }
 
 export interface GetSenseTranslateResponse {
@@ -44,6 +45,8 @@ export interface TranslateStreamRequest {
   src_lang?: string;
   // 目标语言过滤，可选，只返回指定目标语言的翻译（预加载翻译池必填）
   dst_lang?: string;
+  // 多个目标语言过滤，可选，只返回指定目标语言数组中的翻译
+  dst_langs?: string[];
 }
 
 export interface TranslateStreamResponse {
@@ -1037,7 +1040,9 @@ class TranslationPool {
           senseId: this.senseId,
           text,
           from_lang: fromLang,
-          to_lang: toLang
+          to_lang: toLang,
+          src_lang: fromLang,
+          dst_lang: toLang
         },
         (response) => {
           // Check if we got a translation
@@ -1374,6 +1379,9 @@ export class TranslationClient {
   private timeout: number;
   private config: TranslationClientConfig;
   
+  // Default target language(s) filter
+  dstLang?: string | string[];
+  
   // LRU cache for LLM translations
   private llmCacheEnabled: boolean;
   private llmCache: LRUCache<string, LLMTranslateResponse>;
@@ -1440,14 +1448,19 @@ export class TranslationClient {
    * Create a new TranslationClient - the only entry point you need
    * @param config Client configuration
    */
-  constructor(config: TranslationClientConfig) {
-    this.config = config;
+  constructor(config: TranslationClientConfig & { dstLang?: string | string[] }) {
+    this.config = config as TranslationClientConfig;
     this.token = config.token;
     // Default baseUrl includes the API path prefix /api/v1/translate
     this.baseUrl = (config.baseUrl || 'https://api.hottol.com/laker/api/v1/translate').endsWith('/')
       ? (config.baseUrl || 'https://api.hottol.com/laker/api/v1/translate').slice(0, -1)
       : (config.baseUrl || 'https://api.hottol.com/laker/api/v1/translate');
     this.timeout = config.timeout || 30000;
+    
+    // Store default dstLang if provided
+    if (config.dstLang !== undefined) {
+      this.dstLang = config.dstLang;
+    }
     
     // Configure LRU cache for LLM translations
     this.llmCacheEnabled = config.useCache !== false;
@@ -1837,7 +1850,22 @@ export class TranslationClient {
   async getSenseTranslate(request: GetSenseTranslateRequest): Promise<GetSenseTranslateResponse> {
     const url = `${this.baseUrl}/TranslationService/GetSenseTranslate`;
 
-    const response = await this.fetchJson(url, request);
+    const req = {
+      ...request,
+      // Add src_lang from request if provided
+      ...(request.src_lang !== undefined && { src_lang: request.src_lang }),
+      // Add dst_lang/dst_langs from request if provided, otherwise use client defaults
+      ...(request.dst_lang !== undefined ? 
+        { dst_lang: request.dst_lang } : 
+        (this.dstLang !== undefined && typeof this.dstLang === 'string' && this.dstLang !== '' ? 
+          { dst_lang: this.dstLang } : {})),
+      ...(request.dst_langs !== undefined ? 
+        { dst_langs: request.dst_langs } : 
+        (Array.isArray(this.dstLang) && this.dstLang.length > 0 ? 
+          { dst_langs: this.dstLang } : {})),
+    };
+
+    const response = await this.fetchJson(url, req);
     return response as GetSenseTranslateResponse;
   }
 
@@ -1850,10 +1878,25 @@ export class TranslationClient {
     request: TranslateStreamRequest,
     onBatch: (response: TranslateStreamResponse) => boolean | void
   ): Promise<void> {
+    // Apply default dstLang if provided and not in request
+    const req = {
+      ...request,
+      // Add src_lang from request if provided
+      ...(request.src_lang !== undefined && { src_lang: request.src_lang }),
+      // Add dst_lang/dst_langs from request if provided, otherwise use client defaults
+      ...(request.dst_lang !== undefined ?
+        { dst_lang: request.dst_lang } :
+        (this.dstLang !== undefined && typeof this.dstLang === 'string' && this.dstLang !== '' ?
+          { dst_lang: this.dstLang } : {})),
+      ...(request.dst_langs !== undefined ?
+        { dst_langs: request.dst_langs } :
+        (Array.isArray(this.dstLang) && this.dstLang.length > 0 ?
+          { dst_langs: this.dstLang } : {})),
+    };
     // Use persistent connection with multiplexing
     await this.sendPersistentRequest(
       'TranslationService/TranslateStream',
-      request,
+      req,
       (data) => onBatch(data as TranslateStreamResponse)
     );
   }
@@ -2046,78 +2089,118 @@ export class TranslationClient {
     const abortController = new AbortController();
     this.currentAbortController = abortController;
     
-    return new Promise((resolve, reject) => {
-      // Check if language has changed since this request started
-      if (this.languageVersion !== requestLanguageVersion) {
-        console.log(`[TranslationClient] Language changed during request, discarding response for: "${text}"`);
-        reject(new Error('Language changed during request'));
-        return;
-      }
-      
-      this.translateStream(
-        {
-          senseId: this.config.senseId,
-          fingerprint,
-          text,
-          from_lang: fromLang,
-          to_lang: toLang
-        },
-        (response) => {
-          // Check if request was aborted
-          if (abortController.signal.aborted) {
-            console.log(`[TranslationClient] Request aborted for: "${text}"`);
-            reject(new Error('Request aborted'));
-            return false;
-          }
-          
-          // Check if language has changed during streaming
-          if (this.languageVersion !== requestLanguageVersion) {
-            console.log(`[TranslationClient] Language changed during streaming for: "${text}"`);
-            reject(new Error('Language changed during request'));
-            return false;
-          }
-          
-          // Check if we got a translation
-          if (response.translation && response.translation[text]) {
-            const translatedText = response.translation[text];
-            
-            // Validate language version before adding to pool
-            if (this.languageVersion === requestLanguageVersion) {
-              // Add to pool with current language version and toLang for validation
-              this.pool.addTranslation(text, translatedText, fingerprint, this.languageVersion, toLang);
-            }
-            
-            resolve({
-              originalText: text,
-              translatedText: translatedText,
-              provider: 'translate-stream',
-              timestamp: response.timestamp,
-              finished: response.finished,
-              cached: false,
-              fromLang,
-              toLang
-            });
-            return false; // Stop streaming
-          }
-          
-          // Check for error
-          if (response.translation && response.translation['error']) {
-            reject(new Error(response.translation['error']));
-            return false;
-          }
-          
-          // Continue if not finished
-          return !response.finished;
-        }
-      ).catch((err) => {
-        // Don't reject if aborted
-        if (abortController.signal.aborted) {
-          console.log(`[TranslationClient] Request aborted for: "${text}"`);
-          return;
-        }
-        reject(err);
-      });
-    });
+     return new Promise((resolve, reject) => {
+       // Check if language has changed since this request started
+       if (this.languageVersion !== requestLanguageVersion) {
+         console.log(`[TranslationClient] Language changed during request, discarding response for: "${text}"`);
+         reject(new Error('Language changed during request'));
+         return;
+       }
+       
+       let resolved = false;
+       
+       this.translateStream(
+         {
+           senseId: this.config.senseId,
+           fingerprint,
+           text,
+           from_lang: fromLang,
+           to_lang: toLang,
+           src_lang: fromLang,
+           dst_lang: toLang
+         },
+         (response) => {
+           // Check if request was aborted
+           if (abortController.signal.aborted) {
+             console.log(`[TranslationClient] Request aborted for: "${text}"`);
+             if (!resolved) {
+               reject(new Error('Request aborted'));
+               resolved = true;
+             }
+             return false;
+           }
+           
+           // Check if language has changed during streaming
+           if (this.languageVersion !== requestLanguageVersion) {
+             console.log(`[TranslationClient] Language changed during streaming for: "${text}"`);
+             if (!resolved) {
+               reject(new Error('Language changed during request'));
+               resolved = true;
+             }
+             return false;
+           }
+           
+           // Check if we got a translation
+           if (response.translation && response.translation[text]) {
+             const translatedText = response.translation[text];
+             
+             // Validate language version before adding to pool
+             if (this.languageVersion === requestLanguageVersion) {
+               // Add to pool with current language version and toLang for validation
+               this.pool.addTranslation(text, translatedText, fingerprint, this.languageVersion, toLang);
+             }
+             
+             if (!resolved) {
+               resolve({
+                 originalText: text,
+                 translatedText: translatedText,
+                 provider: 'translate-stream',
+                 timestamp: response.timestamp,
+                 finished: response.finished,
+                 cached: false,
+                 fromLang,
+                 toLang
+               });
+               resolved = true;
+             }
+             return false; // Stop streaming
+           }
+           
+           // Check for error
+           if (response.translation && response.translation['error']) {
+             if (!resolved) {
+               reject(new Error(response.translation['error']));
+               resolved = true;
+             }
+             return false;
+           }
+           
+           // If finished and still not resolved, that means translation not found in database
+           // Resolve with original text as fallback
+           if (response.finished && !resolved) {
+             console.log(`[TranslationClient] Translation not found in database for: "${text}", returning original text`);
+             if (this.languageVersion === requestLanguageVersion) {
+               // Cache the original text to avoid repeated requests
+               this.pool.addTranslation(text, text, fingerprint, this.languageVersion, toLang);
+             }
+             resolve({
+               originalText: text,
+               translatedText: text,
+               provider: 'translate-stream',
+               timestamp: response.timestamp,
+               finished: true,
+               cached: false,
+               fromLang,
+               toLang
+             });
+             resolved = true;
+           }
+           
+           // Continue if not finished
+           return !response.finished;
+         }
+       ).catch((err) => {
+         // Don't reject if aborted
+         if (abortController.signal.aborted) {
+           console.log(`[TranslationClient] Request aborted for: "${text}"`);
+           return;
+         }
+         if (!resolved) {
+           reject(err);
+           resolved = true;
+         }
+       });
+     });
   }
 
   /**
@@ -2131,26 +2214,50 @@ export class TranslationClient {
   async translateNoCache(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<string> {
     // Use TranslateStream which will automatically call LLM if needed
     return new Promise((resolve, reject) => {
+      let resolved = false;
+      
       this.translateStream(
         {
           senseId: this.config.senseId,
           fingerprint,
           text,
           from_lang: fromLang,
-          to_lang: toLang
+          to_lang: toLang,
+          src_lang: fromLang,
+          dst_lang: toLang
         },
         (response) => {
           if (response.translation && response.translation[text]) {
-            resolve(response.translation[text]);
+            if (!resolved) {
+              resolve(response.translation[text]);
+              resolved = true;
+            }
             return false;
           }
           if (response.translation && response.translation['error']) {
-            reject(new Error(response.translation['error']));
+            if (!resolved) {
+              reject(new Error(response.translation['error']));
+              resolved = true;
+            }
             return false;
           }
+          
+          // If finished and still not resolved, that means translation not found
+          // Resolve with original text as fallback
+          if (response.finished && !resolved) {
+            console.log(`[TranslationClient] Translation not found for: "${text}", returning original text`);
+            resolve(text);
+            resolved = true;
+          }
+          
           return !response.finished;
         }
-      ).catch(reject);
+      ).catch((err) => {
+        if (!resolved) {
+          reject(err);
+          resolved = true;
+        }
+      });
     });
   }
 

@@ -18,6 +18,7 @@ export interface GetSenseTranslateRequest {
     pageSize?: number;
     src_lang?: string;
     dst_lang?: string;
+    dst_langs?: string[];
 }
 export interface GetSenseTranslateResponse {
     senseId: string;
@@ -33,6 +34,9 @@ export interface TranslateStreamRequest {
     text?: string;
     from_lang?: string;
     to_lang?: string;
+    src_lang?: string;
+    dst_lang?: string;
+    dst_langs?: string[];
 }
 export interface TranslateStreamResponse {
     original_text: string;
@@ -147,6 +151,7 @@ export declare class TranslationClient {
     private token;
     private timeout;
     private config;
+    dstLang?: string | string[];
     private llmCacheEnabled;
     private llmCache;
     private pool;
@@ -177,7 +182,9 @@ export declare class TranslationClient {
      * Create a new TranslationClient - the only entry point you need
      * @param config Client configuration
      */
-    constructor(config: TranslationClientConfig);
+    constructor(config: TranslationClientConfig & {
+        dstLang?: string | string[];
+    });
     /**
      * Set up callbacks to forward TranslationPool events to TranslationClient subscribers
      */

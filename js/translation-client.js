@@ -1,4 +1,3 @@
-"use strict";
 /**
  * Translation Service gRPC-Web TypeScript/JavaScript Client
  *
@@ -6,8 +5,6 @@
  * Service: TranslationService
  * Source: proto/translation.proto
  */
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.createTranslation = exports.TranslationClient = exports.extractTemplate = void 0;
 const defaultCrossTabOptions = {
     enabled: false,
     channelName: 'laker-translation-cache',
@@ -18,7 +15,7 @@ const defaultCrossTabOptions = {
  * @param text Original text that may contain numeric variables
  * @returns Template extraction result
  */
-function extractTemplate(text) {
+export function extractTemplate(text) {
     // Regex to find numbers in text
     const numberRegex = /\d+(?:\.\d+)?/g;
     const matches = text.match(numberRegex);
@@ -44,7 +41,6 @@ function extractTemplate(text) {
         variables
     };
 }
-exports.extractTemplate = extractTemplate;
 /**
  * TranslationPool - Multi-fingerprint, multi-language translation cache with automatic common preloading
  *
@@ -64,6 +60,31 @@ exports.extractTemplate = extractTemplate;
  * - All translations are cached independently by fingerprint and language
  */
 class TranslationPool {
+    client;
+    senseId;
+    // Separate cache for each fingerprint+language: "fingerprint:toLang" -> Map<text, translation>
+    pools = new Map();
+    currentFingerprint = null;
+    currentToLang = null;
+    crossTabOptions;
+    broadcastChannel = null;
+    loading = false;
+    // Track loaded fingerprint+language combinations: "fingerprint:toLang"
+    loadedCombinations = new Set();
+    // Language version tracking to validate translations during language changes
+    currentLanguageVersion = 0;
+    // Observer pattern for queueing translation requests during load
+    queuedRequests = [];
+    pendingResolutions = {};
+    // Callback for translation loaded events (reactive binding)
+    onTranslationLoaded = null;
+    // Callback for pool initialization complete
+    onPoolInitialized = null;
+    // Callback for queue processing complete
+    onQueueProcessed = null;
+    // Callback for when a queued translation request is updated with actual translation
+    // This is called after processQueuedRequests completes, allowing UI to refresh
+    onTranslationUpdated = null;
     /**
      * Generate pool key from fingerprint and language
      * @param fingerprint Fingerprint (or 'common')
@@ -80,31 +101,9 @@ class TranslationPool {
      * @param crossTabOptions Cross-tab synchronization options
      */
     constructor(client, senseId, crossTabOptions) {
-        // Separate cache for each fingerprint+language: "fingerprint:toLang" -> Map<text, translation>
-        this.pools = new Map();
-        this.currentFingerprint = null;
-        this.currentToLang = null;
-        this.broadcastChannel = null;
-        this.loading = false;
-        // Track loaded fingerprint+language combinations: "fingerprint:toLang"
-        this.loadedCombinations = new Set();
-        // Language version tracking to validate translations during language changes
-        this.currentLanguageVersion = 0;
-        // Observer pattern for queueing translation requests during load
-        this.queuedRequests = [];
-        this.pendingResolutions = {};
-        // Callback for translation loaded events (reactive binding)
-        this.onTranslationLoaded = null;
-        // Callback for pool initialization complete
-        this.onPoolInitialized = null;
-        // Callback for queue processing complete
-        this.onQueueProcessed = null;
-        // Callback for when a queued translation request is updated with actual translation
-        // This is called after processQueuedRequests completes, allowing UI to refresh
-        this.onTranslationUpdated = null;
         this.client = client;
         this.senseId = senseId;
-        this.crossTabOptions = Object.assign(Object.assign({}, defaultCrossTabOptions), crossTabOptions);
+        this.crossTabOptions = { ...defaultCrossTabOptions, ...crossTabOptions };
         // Note: Pools are now initialized per-language in initialize() or when language is first used
         // We no longer pre-initialize 'common' here - it's done when toLang is set
         if (this.crossTabOptions.enabled && typeof BroadcastChannel !== 'undefined') {
@@ -272,7 +271,10 @@ class TranslationPool {
             type: 'cache_update',
             senseId: this.senseId,
             fingerprint: this.currentFingerprint || undefined,
-            data: Object.assign({ result: this.getAllForFingerprint(fp, toLang) }, (text && translation && { text, translation }))
+            data: {
+                result: this.getAllForFingerprint(fp, toLang),
+                ...(text && translation && { text, translation })
+            }
         };
         this.broadcastChannel.postMessage(message);
         this.saveToStorage(fp, toLang);
@@ -281,12 +283,11 @@ class TranslationPool {
      * Handle incoming cache update from another tab
      */
     handleCacheUpdate(message) {
-        var _a, _b, _c;
         const fp = message.fingerprint || 'common';
         // Get toLang from the message or use current
         const toLang = this.currentToLang || 'en';
         const poolKey = this.getPoolKey(fp, toLang);
-        if ((_a = message.data) === null || _a === void 0 ? void 0 : _a.result) {
+        if (message.data?.result) {
             // Update full cache for this fingerprint+language
             let pool = this.pools.get(poolKey);
             if (!pool) {
@@ -300,7 +301,7 @@ class TranslationPool {
             this.loadedCombinations.add(poolKey);
         }
         // Update specific entry
-        if (((_b = message.data) === null || _b === void 0 ? void 0 : _b.text) && ((_c = message.data) === null || _c === void 0 ? void 0 : _c.translation)) {
+        if (message.data?.text && message.data?.translation) {
             const pool = this.pools.get(poolKey) || new Map();
             pool.set(message.data.text, message.data.translation);
             this.pools.set(poolKey, pool);
@@ -336,7 +337,11 @@ class TranslationPool {
         // Create a pending promise that will be resolved after pool loads
         const promise = new Promise((resolve, reject) => {
             // Queue the request for processing after pool loads
-            const queuedReq = Object.assign(Object.assign({}, request), { resolveFunction: resolve, rejectFunction: reject });
+            const queuedReq = {
+                ...request,
+                resolveFunction: resolve,
+                rejectFunction: reject
+            };
             this.queuedRequests.push(queuedReq);
             // Store reference to allow later resolution
             const key = `${request.text}-${request.fingerprint || 'common'}`;
@@ -550,6 +555,7 @@ class TranslationPool {
             senseId: this.senseId,
             fingerprint,
             to_lang: toLang,
+            dst_lang: toLang,
             batchSize: 500
         }, (response) => {
             // Add all translations from this batch to the fingerprint's pool
@@ -755,7 +761,9 @@ class TranslationPool {
                 senseId: this.senseId,
                 text,
                 from_lang: fromLang,
-                to_lang: toLang
+                to_lang: toLang,
+                src_lang: fromLang,
+                dst_lang: toLang
             }, (response) => {
                 // Check if we got a translation
                 if (response.translation && response.translation[text]) {
@@ -922,6 +930,8 @@ class TranslationPool {
  * Uses Map with access order for O(1) get/set operations
  */
 class LRUCache {
+    capacity;
+    cache;
     constructor(capacity = 1000) {
         this.capacity = capacity;
         this.cache = new Map();
@@ -1008,52 +1018,65 @@ const defaultClientCrossTabOptions = {
  * - Lazy initialization: automatically preloads on first use
  * - Simple single-level API, no complex layering
  */
-class TranslationClient {
+export class TranslationClient {
+    baseUrl;
+    token;
+    timeout;
+    config;
+    // Default target language(s) filter
+    dstLang;
+    // LRU cache for LLM translations
+    llmCacheEnabled;
+    llmCache;
+    // Translation pool for pre-loaded translations (fingerprint support)
+    pool;
+    currentFingerprint = null;
+    initialized = false;
+    initPromise = null;
+    currentToLang = null;
+    // Language version token to detect and handle language changes during concurrent requests
+    languageVersion = 0;
+    // AbortController to cancel in-flight requests when language changes
+    currentAbortController = null;
+    // Cross-tab for LLM cache
+    broadcastChannel = null;
+    crossTabOptions;
+    storageKey;
+    // ========== Persistent gRPC-Web Connection ==========
+    // Single persistent EventSource connection for all streaming requests
+    persistentConnection = null;
+    // Connection state
+    connectionState = 'disconnected';
+    // Pending request callbacks mapped by request ID
+    pendingRequests = new Map();
+    // Next request ID counter
+    nextRequestId = 1;
+    // Connection connect promise
+    connectPromise = null;
+    // Reconnect delay for backoff
+    reconnectDelay = 1000;
+    // Maximum reconnect delay
+    maxReconnectDelay = 30000;
+    // Whether we should reconnect on disconnection
+    shouldReconnect = true;
+    // ========== Reactive Binding Event Emitter ==========
+    // Simple callback for translation updates (alternative to subscribers)
+    onTranslationUpdated = null;
+    // Simple callback for pool initialization complete
+    onPoolInitialized = null;
+    // Simple callback for queue processed events
+    onQueueProcessed = null;
+    // Subscribers for translation update events (for UI reactive updates)
+    translationUpdatedSubscribers = [];
+    // Subscribers for pool initialization complete
+    poolInitializedSubscribers = [];
+    // Subscribers for queue processed events
+    queueProcessedSubscribers = [];
     /**
      * Create a new TranslationClient - the only entry point you need
      * @param config Client configuration
      */
     constructor(config) {
-        this.currentFingerprint = null;
-        this.initialized = false;
-        this.initPromise = null;
-        this.currentToLang = null;
-        // Language version token to detect and handle language changes during concurrent requests
-        this.languageVersion = 0;
-        // AbortController to cancel in-flight requests when language changes
-        this.currentAbortController = null;
-        // Cross-tab for LLM cache
-        this.broadcastChannel = null;
-        // ========== Persistent gRPC-Web Connection ==========
-        // Single persistent EventSource connection for all streaming requests
-        this.persistentConnection = null;
-        // Connection state
-        this.connectionState = 'disconnected';
-        // Pending request callbacks mapped by request ID
-        this.pendingRequests = new Map();
-        // Next request ID counter
-        this.nextRequestId = 1;
-        // Connection connect promise
-        this.connectPromise = null;
-        // Reconnect delay for backoff
-        this.reconnectDelay = 1000;
-        // Maximum reconnect delay
-        this.maxReconnectDelay = 30000;
-        // Whether we should reconnect on disconnection
-        this.shouldReconnect = true;
-        // ========== Reactive Binding Event Emitter ==========
-        // Simple callback for translation updates (alternative to subscribers)
-        this.onTranslationUpdated = null;
-        // Simple callback for pool initialization complete
-        this.onPoolInitialized = null;
-        // Simple callback for queue processed events
-        this.onQueueProcessed = null;
-        // Subscribers for translation update events (for UI reactive updates)
-        this.translationUpdatedSubscribers = [];
-        // Subscribers for pool initialization complete
-        this.poolInitializedSubscribers = [];
-        // Subscribers for queue processed events
-        this.queueProcessedSubscribers = [];
         this.config = config;
         this.token = config.token;
         // Default baseUrl includes the API path prefix /api/v1/translate
@@ -1061,6 +1084,10 @@ class TranslationClient {
             ? (config.baseUrl || 'https://api.hottol.com/laker/api/v1/translate').slice(0, -1)
             : (config.baseUrl || 'https://api.hottol.com/laker/api/v1/translate');
         this.timeout = config.timeout || 30000;
+        // Store default dstLang if provided
+        if (config.dstLang !== undefined) {
+            this.dstLang = config.dstLang;
+        }
         // Configure LRU cache for LLM translations
         this.llmCacheEnabled = config.useCache !== false;
         const llmCacheSize = this.llmCacheEnabled ? (config.cacheSize || 1000) : 0;
@@ -1083,7 +1110,7 @@ class TranslationClient {
             this.pool['currentFingerprint'] = config.fingerprint;
         }
         // Cross-tab for LLM cache
-        this.crossTabOptions = Object.assign({}, defaultClientCrossTabOptions);
+        this.crossTabOptions = { ...defaultClientCrossTabOptions };
         this.storageKey = this.crossTabOptions.storageKey;
         // Initialize cross-tab synchronization if enabled
         if (config.crossTab && typeof BroadcastChannel !== 'undefined') {
@@ -1407,7 +1434,21 @@ class TranslationClient {
      */
     async getSenseTranslate(request) {
         const url = `${this.baseUrl}/TranslationService/GetSenseTranslate`;
-        const response = await this.fetchJson(url, request);
+        const req = {
+            ...request,
+            // Add src_lang from request if provided
+            ...(request.src_lang !== undefined && { src_lang: request.src_lang }),
+            // Add dst_lang/dst_langs from request if provided, otherwise use client defaults
+            ...(request.dst_lang !== undefined ?
+                { dst_lang: request.dst_lang } :
+                (this.dstLang !== undefined && typeof this.dstLang === 'string' && this.dstLang !== '' ?
+                    { dst_lang: this.dstLang } : {})),
+            ...(request.dst_langs !== undefined ?
+                { dst_langs: request.dst_langs } :
+                (Array.isArray(this.dstLang) && this.dstLang.length > 0 ?
+                    { dst_langs: this.dstLang } : {})),
+        };
+        const response = await this.fetchJson(url, req);
         return response;
     }
     /**
@@ -1416,8 +1457,23 @@ class TranslationClient {
      * @param onBatch Callback for each batch received. Return false to stop streaming early.
      */
     async translateStream(request, onBatch) {
+        // Apply default dstLang if provided and not in request
+        const req = {
+            ...request,
+            // Add src_lang from request if provided
+            ...(request.src_lang !== undefined && { src_lang: request.src_lang }),
+            // Add dst_lang/dst_langs from request if provided, otherwise use client defaults
+            ...(request.dst_lang !== undefined ?
+                { dst_lang: request.dst_lang } :
+                (this.dstLang !== undefined && typeof this.dstLang === 'string' && this.dstLang !== '' ?
+                    { dst_lang: this.dstLang } : {})),
+            ...(request.dst_langs !== undefined ?
+                { dst_langs: request.dst_langs } :
+                (Array.isArray(this.dstLang) && this.dstLang.length > 0 ?
+                    { dst_langs: this.dstLang } : {})),
+        };
         // Use persistent connection with multiplexing
-        await this.sendPersistentRequest('TranslationService/TranslateStream', request, (data) => onBatch(data));
+        await this.sendPersistentRequest('TranslationService/TranslateStream', req, (data) => onBatch(data));
     }
     /**
      * Collect all streaming responses into an array
@@ -1445,7 +1501,7 @@ class TranslationClient {
             const cached = this.llmCache.get(cacheKey);
             if (cached) {
                 // Return cached response with cached flag set
-                return Object.assign(Object.assign({}, cached), { cached: true });
+                return { ...cached, cached: true };
             }
         }
         // Request from backend using gRPC-web streaming LLMTranslateStream
@@ -1460,12 +1516,12 @@ class TranslationClient {
         }
         // Cache the response
         if (this.llmCacheEnabled && finalResponse.translatedText) {
-            const cachedResponse = Object.assign(Object.assign({}, finalResponse), { cached: true });
+            const cachedResponse = { ...finalResponse, cached: true };
             this.llmCache.set(cacheKey, cachedResponse);
             // Broadcast to other tabs and save to localStorage
             this.broadcastCacheUpdate(cacheKey, cachedResponse);
         }
-        return Object.assign(Object.assign({}, finalResponse), { cached: false });
+        return { ...finalResponse, cached: false };
     }
     // ========== High-level translation API ==========
     /**
@@ -1585,7 +1641,9 @@ class TranslationClient {
                 fingerprint,
                 text,
                 from_lang: fromLang,
-                to_lang: toLang
+                to_lang: toLang,
+                src_lang: fromLang,
+                dst_lang: toLang
             }, (response) => {
                 // Check if request was aborted
                 if (abortController.signal.aborted) {
@@ -1652,7 +1710,9 @@ class TranslationClient {
                 fingerprint,
                 text,
                 from_lang: fromLang,
-                to_lang: toLang
+                to_lang: toLang,
+                src_lang: fromLang,
+                dst_lang: toLang
             }, (response) => {
                 if (response.translation && response.translation[text]) {
                     resolve(response.translation[text]);
@@ -2002,7 +2062,10 @@ class TranslationClient {
                 const url = `${this.baseUrl}/${method}`;
                 const response = await fetch(url, {
                     method: 'POST',
-                    body: JSON.stringify(Object.assign(Object.assign({}, request), { requestId })),
+                    body: JSON.stringify({
+                        ...request,
+                        requestId
+                    }),
                     headers: this.getHeaders()
                 });
                 if (!response.ok) {
@@ -2042,7 +2105,10 @@ class TranslationClient {
     async fetchWithTimeout(url, options) {
         const controller = new AbortController();
         const id = setTimeout(() => controller.abort(), this.timeout);
-        const response = await fetch(url, Object.assign(Object.assign({}, options), { signal: controller.signal }));
+        const response = await fetch(url, {
+            ...options,
+            signal: controller.signal
+        });
         clearTimeout(id);
         return response;
     }
@@ -2069,7 +2135,6 @@ class TranslationClient {
         ].join('\n');
     }
 }
-exports.TranslationClient = TranslationClient;
 /**
  * Create a TranslationClient instance with simplified configuration
  * @param token JWT authentication token
@@ -2077,12 +2142,14 @@ exports.TranslationClient = TranslationClient;
  * @param options Additional options
  * @returns TranslationClient instance
  */
-function createTranslation(token, senseId, options) {
-    return new TranslationClient(Object.assign({ token,
-        senseId }, options));
+export function createTranslation(token, senseId, options) {
+    return new TranslationClient({
+        token,
+        senseId,
+        ...options
+    });
 }
-exports.createTranslation = createTranslation;
-exports.default = createTranslation;
+export default createTranslation;
 // Auto-export to global for browser usage
 if (typeof window !== 'undefined') {
     window.LakerTranslation = {
