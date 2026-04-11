@@ -265,5 +265,5 @@ declare class TranslationClient {
      */
     getClient(): PromiseClient<typeof TranslationService>;
 }
-export { TranslationPool, TranslationClient, };
+export { TranslationPool, TranslationClient, extractTemplate, };
 export default TranslationClient;
