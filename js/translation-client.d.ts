@@ -9,6 +9,7 @@
  * Supports true multiplexing on a single connection
  */
 import { TranslationService } from './gen/translation_connect.js';
+import { PromiseClient } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, LLMTranslateRequest, LLMTranslateResponse, TranslateRecord, } from './gen/translation_pb.js';
 export type GetSenseTranslateRequestOptions = {
@@ -20,7 +21,7 @@ export type GetSenseTranslateRequestOptions = {
     dstLang?: string;
     dstLangs?: string[];
 };
-import type { PromiseClient } from '@connectrpc/connect';
+import type { GetSenseTranslateResponse, TranslateStreamResponse, LLMTranslateResponse } from './gen/translation_pb.js';
 /**
  * Automatic template extraction from text containing numeric variables
  * @param text Original text that may contain numeric variables
@@ -209,40 +210,39 @@ declare class TranslationPool {
     updateEntryMetadata(text: string, toLang: string): void;
 }
 export type TranslationClientOptions = {
-    baseUrl: string;
-    useH2?: boolean;
+    baseUrl?: string;
+    senseId: string;
+    defaultFromLang?: string;
+    crossTab?: Partial<CrossTabOptions>;
+    backgroundUpdate?: Partial<BackgroundUpdateOptions>;
+    persistentStorage?: unknown;
 };
 declare class TranslationClient {
     baseUrl: string;
     client: PromiseClient<typeof TranslationService>;
     transport: ReturnType<typeof createConnectTransport>;
+    private pool;
+    private senseId;
+    private defaultFromLang;
     constructor(options: TranslationClientOptions);
     /**
-     * Create a translation pool for a specific semantic sense
-     * The pool caches translations and enables streaming loading
-     * @param senseId The semantic sense ID
-     * @param options Pool configuration options
-     * @returns TranslationPool instance
-     */
-    createPool(senseId: string, options?: TranslationPoolOptions): TranslationPool;
-    /**
-     * Translate text with full response details
+     * Simple one-shot translation - automatically handles caching, initialization, and queuing
      * @param text Original text to translate
      * @param toLang Target language code
-     * @param fromLang Source language code (optional)
+     * @param fromLang Source language code (optional, defaults to client default)
+     * @param fingerprint Text fingerprint for domain-specific translations
+     * @returns Promise with translated text (resolves when translation completes)
+     */
+    translate(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<string>;
+    /**
+     * Translate text with full response details (direct API call, no caching)
+     * @param text Original text to translate
+     * @param toLang Target language code
+     * @param fromLang Source language code (optional, defaults to client default)
      * @param fingerprint Text fingerprint for domain-specific translations
      * @returns Promise with complete translation response
      */
     translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<LLMTranslateResponse>;
-    /**
-     * Simple translation that just returns the translated text string
-     * @param text Original text to translate
-     * @param toLang Target language code
-     * @param fromLang Source language code (optional)
-     * @param fingerprint Text fingerprint for domain-specific translations
-     * @returns Promise with translated text
-     */
-    translate(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<string>;
     /**
      * Stream translation batches for a semantic sense
      * Uses native Connect RPC streaming with true multiplexing
@@ -252,7 +252,7 @@ declare class TranslationClient {
      * @param batchSize Optional batch size (default 500)
      * @returns Async iterable stream of translation responses
      */
-    translateStream(senseId: string, dstLang: string, fingerprint?: string, batchSize?: number): AsyncIterable<TranslateStreamResponse>;
+    translateStream(senseId: string, dstLang: string, fingerprint?: string): AsyncIterable<TranslateStreamResponse>;
     /**
      * Get paged list of translations for a semantic sense with optional filtering
      * @param options Request options including filtering, pagination

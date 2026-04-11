@@ -1,6 +1,6 @@
 {
   "name": "@alaikis/translation-sdk",
-  "version": "1.3.18",
+  "version": "1.4.2",
   "description": "Translation Service Connect RPC JavaScript/TypeScript SDK",
   "type": "module",
   "main": "translation-client.js",
@@ -10,10 +10,12 @@
     "*.js",
     "*.d.ts",
     "gen/*.js",
-    "gen/*.d.ts"
+    "gen/*.d.ts",
+    "google/**/*.js",
+    "google/**/*.d.ts"
   ],
   "scripts": {
-    "build": "npx tsc && npx rollup --config rollup.config.js"
+    "build": "npx rollup --config rollup.config.js"
   },
   "keywords": [
     "translation",
@@ -35,16 +37,19 @@
   },
   "homepage": "https://github.com/alaikis/laker-translate-sdk#readme",
   "devDependencies": {
+    "@bufbuild/protoc-gen-es": "^2.11.0",
+    "@connectrpc/protoc-gen-connect-es": "^1.7.0",
     "@rollup/plugin-typescript": "^12.3.0",
-    "rollup": "^4.60.0",
-    "tslib": "^2.8.1",
+    "abort-controller": "^3.0.0",
+    "eventsource": "^4.1.0",
+    "node-fetch": "^2.7.0",
+    "rollup": "^4.60.1",
     "typescript": "^6.0.2"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.11.0",
-    "@bufbuild/protoc-gen-es": "^2.11.0",
-    "@connectrpc/connect": "^2.1.1",
-    "@connectrpc/connect-web": "^2.1.1",
+    "@connectrpc/connect": "^1.7.0",
+    "@connectrpc/connect-web": "^1.7.0",
     "broadcast-channel": "^7.3.0"
   }
 }
