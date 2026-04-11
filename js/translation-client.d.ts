@@ -8,10 +8,8 @@
  * This client uses Connect RPC for native HTTP streaming over HTTP/2
  * Supports true multiplexing on a single connection
  */
-import { TranslationService } from './gen/translation_connect.js';
-import { PromiseClient } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
-export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, LLMTranslateRequest, LLMTranslateResponse, TranslateRecord, } from './gen/translation_pb.js';
+export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord, } from './gen/proto/translation_pb.js';
 export type GetSenseTranslateRequestOptions = {
     senseId: string;
     fingerprint?: string;
@@ -21,7 +19,7 @@ export type GetSenseTranslateRequestOptions = {
     dstLang?: string;
     dstLangs?: string[];
 };
-import type { GetSenseTranslateResponse, TranslateStreamResponse, LLMTranslateResponse } from './gen/translation_pb.js';
+import type { GetSenseTranslateResponse, TranslateStreamResponse } from './gen/proto/translation_pb.js';
 /**
  * Automatic template extraction from text containing numeric variables
  * @param text Original text that may contain numeric variables
@@ -48,19 +46,21 @@ type TranslationPoolOptions = {
     crossTab?: Partial<CrossTabOptions>;
     persistentStorage?: unknown;
     backgroundUpdate?: Partial<BackgroundUpdateOptions>;
+    senseId?: string;
+    defaultFromLang?: string;
 };
 type PendingRequest = {
     text: string;
     toLang: string;
     fromLang?: string;
     fingerprint?: string;
-    resolveFunction: (response: LLMTranslateResponse) => void;
+    resolveFunction: (response: TranslateStreamResponse) => void;
     rejectFunction: (error: Error) => void;
 };
 type PendingResolutions = Record<string, {
-    resolve: (value: LLMTranslateResponse) => void;
+    resolve: (value: TranslateStreamResponse) => void;
     reject: (error: Error) => void;
-    resolveList: Array<(value: LLMTranslateResponse) => void>;
+    resolveList: Array<(value: TranslateStreamResponse) => void>;
     rejectList: Array<(error: Error) => void>;
 }>;
 type CacheEntryMetadata = {
@@ -89,6 +89,7 @@ declare class TranslationPool {
     backgroundUpdateTimer: ReturnType<typeof setInterval> | null;
     entryMetadata: Map<string, CacheEntryMetadata>;
     updateCallback: ((text: string, toLang: string) => void) | null;
+    options?: TranslationPoolOptions;
     getPoolKey(fingerprint: string, toLang: string): string;
     constructor(client: TranslationClient, senseId: string, options?: TranslationPoolOptions);
     setTranslationLoadedCallback(callback: (text: string, translation: string) => void): void;
@@ -121,7 +122,7 @@ declare class TranslationPool {
         toLang: string;
         fromLang?: string;
         fingerprint?: string;
-    }): Promise<LLMTranslateResponse>;
+    }): Promise<TranslateStreamResponse>;
     processQueuedRequests(maxRetries?: number, retryDelayMs?: number): Promise<void>;
     hasQueuedRequests(): boolean;
     clearQueuedRequests(): void;
@@ -132,8 +133,14 @@ declare class TranslationPool {
     addPreloadedTranslations(preloaded: Record<string, Record<string, Record<string, string>>>): void;
     addTranslation(text: string, translation: string): void;
     addTranslationToFingerprint(text: string, translation: string, fingerprint: string, toLang: string): void;
-    lookup(text: string, fingerprint?: string): {
+    /**
+     * Alias for addTranslationToFingerprint - convenient manual caching
+     * Parameter order: text, fingerprint, translation, toLang
+     */
+    put(text: string, fingerprint: string, translation: string, toLang: string): void;
+    lookup(text: string, fingerprint?: string, toLang?: string): {
         found: boolean;
+        fromCache: boolean;
         translation?: string;
     };
     /**
@@ -145,7 +152,8 @@ declare class TranslationPool {
     /**
      * Get the number of cached translations for a specific fingerprint and language
      * If language is not specified, uses current language
-     * @param fingerprint Fingerprint (default 'common')
+     * If fingerprint is not specified, returns total size across all fingerprints for current language
+     * @param fingerprint Fingerprint (optional, returns total if not specified)
      * @param toLang Target language (uses current if not specified)
      * @returns Number of cached translations
      */
@@ -175,6 +183,10 @@ declare class TranslationPool {
      * Does not affect preloaded translations unless they were added after initialization
      */
     clearAll(): void;
+    /**
+     * Alias for clearAll - clear entire cache
+     */
+    clearCache(): void;
     /**
      * Set the current active fingerprint
      * Doesn't clear existing cache, just changes lookup priority
@@ -213,17 +225,20 @@ export type TranslationClientOptions = {
     baseUrl?: string;
     senseId: string;
     defaultFromLang?: string;
+    token?: string;
     crossTab?: Partial<CrossTabOptions>;
     backgroundUpdate?: Partial<BackgroundUpdateOptions>;
     persistentStorage?: unknown;
 };
 declare class TranslationClient {
     baseUrl: string;
-    client: PromiseClient<typeof TranslationService>;
+    token?: string;
+    client: any;
     transport: ReturnType<typeof createConnectTransport>;
     private pool;
     private senseId;
     private defaultFromLang;
+    options: TranslationClientOptions;
     constructor(options: TranslationClientOptions);
     /**
      * Simple one-shot translation - automatically handles caching, initialization, and queuing
@@ -242,7 +257,7 @@ declare class TranslationClient {
      * @param fingerprint Text fingerprint for domain-specific translations
      * @returns Promise with complete translation response
      */
-    translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<LLMTranslateResponse>;
+    translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<TranslateStreamResponse>;
     /**
      * Stream translation batches for a semantic sense
      * Uses native Connect RPC streaming with true multiplexing
@@ -260,10 +275,25 @@ declare class TranslationClient {
      */
     getSenseTranslations(options: GetSenseTranslateRequestOptions): Promise<GetSenseTranslateResponse>;
     /**
-     * Get the underlying Connect RPC client for advanced use
-     * @returns The promise client instance
+     * Create a translation pool for preloading and caching translations
+     * @param senseId Semantic sense ID to create pool for
+     * @param options Pool configuration options
+     * @returns TranslationPool instance
      */
-    getClient(): PromiseClient<typeof TranslationService>;
+    createPool(senseId: string, options?: TranslationPoolOptions): TranslationPool;
+    /**
+     * Get the underlying Connect RPC client for advanced use
+     * @returns The client instance
+     */
+    getClient(): any;
+    /**
+     * Get information about the current sense
+     * @returns Object containing sense ID and default settings
+     */
+    getSenseInfo(): {
+        senseId: string;
+        defaultFromLang: string;
+    };
 }
-export { TranslationPool, TranslationClient, extractTemplate, };
 export default TranslationClient;
+export { TranslationClient, TranslationPool };

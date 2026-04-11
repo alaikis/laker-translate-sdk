@@ -15,12 +15,10 @@ import {
   GetSenseTranslateResponseSchema,
   TranslateStreamRequestSchema,
   TranslateStreamResponseSchema,
-  LLMTranslateRequestSchema,
-  LLMTranslateResponseSchema,
   TranslateRecordSchema,
-} from './gen/translation_pb.js';
-import { TranslationService } from './gen/translation_connect.js';
-import { createPromiseClient, PromiseClient } from '@connectrpc/connect';
+  TranslationService,
+} from './gen/proto/translation_pb.js';
+import { createClient, type Client } from '@connectrpc/connect';
 import { createConnectTransport } from '@connectrpc/connect-web';
 import { create } from '@bufbuild/protobuf';
 
@@ -30,10 +28,8 @@ export type {
   GetSenseTranslateResponse,
   TranslateStreamRequest,
   TranslateStreamResponse,
-  LLMTranslateRequest,
-  LLMTranslateResponse,
   TranslateRecord,
-} from './gen/translation_pb.js';
+} from './gen/proto/translation_pb.js';
 
 export type GetSenseTranslateRequestOptions = {
   senseId: string;
@@ -45,11 +41,11 @@ export type GetSenseTranslateRequestOptions = {
   dstLangs?: string[];
 };
 
+// Re-export response types from generated code
 import type {
   GetSenseTranslateResponse,
   TranslateStreamResponse,
-  LLMTranslateResponse,
-} from './gen/translation_pb.js';
+} from './gen/proto/translation_pb.js';
 
 const defaultCrossTabOptions = {
   enabled: false,
@@ -114,6 +110,8 @@ type TranslationPoolOptions = {
   crossTab?: Partial<CrossTabOptions>;
   persistentStorage?: unknown;
   backgroundUpdate?: Partial<BackgroundUpdateOptions>;
+  senseId?: string;
+  defaultFromLang?: string;
 };
 
 type PendingRequest = {
@@ -121,16 +119,16 @@ type PendingRequest = {
   toLang: string;
   fromLang?: string;
   fingerprint?: string;
-  resolveFunction: (response: LLMTranslateResponse) => void;
+  resolveFunction: (response: TranslateStreamResponse) => void;
   rejectFunction: (error: Error) => void;
 };
 
 type PendingResolutions = Record<
   string,
   {
-    resolve: (value: LLMTranslateResponse) => void;
+    resolve: (value: TranslateStreamResponse) => void;
     reject: (error: Error) => void;
-    resolveList: Array<(value: LLMTranslateResponse) => void>;
+    resolveList: Array<(value: TranslateStreamResponse) => void>;
     rejectList: Array<(error: Error) => void>;
   }
 >;
@@ -162,6 +160,7 @@ class TranslationPool {
   backgroundUpdateTimer: ReturnType<typeof setInterval> | null = null;
   entryMetadata = new Map<string, CacheEntryMetadata>();
   updateCallback: ((text: string, toLang: string) => void) | null = null;
+  options?: TranslationPoolOptions;
 
   getPoolKey(fingerprint: string, toLang: string): string {
     return `${fingerprint}:${toLang}`;
@@ -174,11 +173,14 @@ class TranslationPool {
   ) {
     this.client = client;
     this.senseId = senseId;
+    
+    // Set up crossTabOptions with defaults
     this.crossTabOptions = {
       ...defaultCrossTabOptions,
       ...options?.crossTab,
     };
-    this.persistentStorage = options?.persistentStorage;
+    
+    // Set up backgroundUpdateOptions with defaults
     this.backgroundUpdateOptions = {
       enabled: options?.backgroundUpdate?.enabled ?? false,
       intervalMs: options?.backgroundUpdate?.intervalMs ?? 5 * 60 * 1000,
@@ -186,6 +188,17 @@ class TranslationPool {
       staleThresholdMs:
         options?.backgroundUpdate?.staleThresholdMs ?? 24 * 60 * 60 * 1000,
     };
+    
+    // Store full options including defaults for API access
+    this.options = {
+      ...options,
+      senseId,
+      crossTab: this.crossTabOptions,
+      backgroundUpdate: this.backgroundUpdateOptions,
+    };
+    
+    this.persistentStorage = options?.persistentStorage;
+    
     if (this.crossTabOptions.enabled && typeof BroadcastChannel !== 'undefined') {
       this.initCrossTabSync();
     }
@@ -387,7 +400,7 @@ class TranslationPool {
     toLang: string;
     fromLang?: string;
     fingerprint?: string;
-  }): Promise<LLMTranslateResponse> {
+  }): Promise<TranslateStreamResponse> {
     const key = `${request.text}-${request.fingerprint || 'common'}`;
     const existingPending = this.pendingResolutions[key];
     if (existingPending) {
@@ -427,24 +440,24 @@ class TranslationPool {
       attempt = 0
     ): Promise<{ text: string; translation: string; success: boolean }> => {
       try {
-        const lookup = this.lookup(req.text, req.fingerprint);
-        if (lookup.found) {
-          const response = await this.client.translateWithDetails(
-            req.text,
-            req.toLang,
-            req.fromLang,
-            req.fingerprint
-          );
-          return { text: req.text, translation: response.translatedText, success: true };
-        } else {
-          const response = await this.client.translateWithDetails(
-            req.text,
-            req.toLang,
-            req.fromLang,
-            req.fingerprint
-          );
-          return { text: req.text, translation: response.translatedText, success: true };
-        }
+         const lookup = this.lookup(req.text, req.fingerprint);
+         if (lookup.found) {
+           const response = await this.client.translateWithDetails(
+             req.text,
+             req.toLang,
+             req.fromLang,
+             req.fingerprint
+           );
+           return { text: req.text, translation: response.translation[req.text] || req.text, success: true };
+         } else {
+           const response = await this.client.translateWithDetails(
+             req.text,
+             req.toLang,
+             req.fromLang,
+             req.fingerprint
+           );
+           return { text: req.text, translation: response.translation[req.text] || req.text, success: true };
+         }
       } catch (error: unknown) {
         console.warn(
           `[TranslationPool] Request failed (attempt ${attempt + 1}/${maxRetries}):`,
@@ -468,15 +481,12 @@ class TranslationPool {
       this.addTranslation(text, translation);
       const queuedReq = requestsToProcess[index];
       if (queuedReq && queuedReq.resolveFunction) {
-        const response = create(LLMTranslateResponseSchema, {
+        const response = create(TranslateStreamResponseSchema, {
           originalText: text,
-          translatedText: translation,
-          provider: 'queued_translation',
+          translation: { [text]: translation },
           timestamp: BigInt(Date.now()),
           finished: true,
-          cached: false,
-          fromLang: queuedReq.fromLang || '',
-          toLang: queuedReq.toLang,
+          batchIndex: 0,
         });
         queuedReq.resolveFunction(response);
         const key = `${text}-${queuedReq.fingerprint || 'common'}`;
@@ -590,7 +600,7 @@ class TranslationPool {
       req.fingerprint = fingerprint;
     }
 
-    const stream = this.client.client.translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
+    const stream = (this.client.client as any).translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
     for await (const response of stream) {
       if (!response.translation) continue;
 
@@ -609,13 +619,12 @@ class TranslationPool {
         pool?.set(text, translateStr);
         const key = `${text}-${fp}`;
         if (this.pendingResolutions[key]) {
-          const responseObj = create(LLMTranslateResponseSchema, {
+          const responseObj = create(TranslateStreamResponseSchema, {
             originalText: text,
-            translatedText: translateStr,
-            provider: 'pool-stream',
+            translation: { [text]: translateStr },
             timestamp: BigInt(Date.now()),
             finished: true,
-            cached: false,
+            batchIndex: 0,
           });
           this.pendingResolutions[key].resolveList.forEach(resolve => resolve(responseObj));
           delete this.pendingResolutions[key];
@@ -623,13 +632,12 @@ class TranslationPool {
         if (fp !== 'common') {
           const commonKey = `${text}-common`;
           if (this.pendingResolutions[commonKey]) {
-            const responseObj = create(LLMTranslateResponseSchema, {
+            const responseObj = create(TranslateStreamResponseSchema, {
               originalText: text,
-              translatedText: translateStr,
-              provider: 'pool-stream',
+              translation: { [text]: translateStr },
               timestamp: BigInt(Date.now()),
               finished: true,
-              cached: false,
+              batchIndex: 0,
             });
             this.pendingResolutions[commonKey].resolveList.forEach(resolve => resolve(responseObj));
             delete this.pendingResolutions[commonKey];
@@ -701,22 +709,34 @@ class TranslationPool {
     this.broadcastUpdate(text, translation);
   }
 
-  lookup(text: string, fingerprint?: string): { found: boolean; translation?: string } {
+  /**
+   * Alias for addTranslationToFingerprint - convenient manual caching
+   * Parameter order: text, fingerprint, translation, toLang
+   */
+  put(text: string, fingerprint: string, translation: string, toLang: string): void {
+    // Set current language if not set, so subsequent lookups work correctly
+    if (!this.currentToLang) {
+      this.currentToLang = toLang;
+    }
+    this.addTranslationToFingerprint(text, translation, fingerprint, toLang);
+  }
+
+  lookup(text: string, fingerprint?: string, toLang?: string): { found: boolean; fromCache: boolean; translation?: string } {
     const fp = fingerprint || this.currentFingerprint || 'common';
-    const toLang = this.currentToLang || 'en';
-    const poolKey = this.getPoolKey(fp, toLang);
+    const lang = toLang || this.currentToLang || 'en';
+    const poolKey = this.getPoolKey(fp, lang);
     const pool = this.pools.get(poolKey);
     if (pool && pool.has(text)) {
-      return { found: true, translation: pool.get(text) };
+      return { found: true, fromCache: true, translation: pool.get(text) };
     }
     if (fp !== 'common') {
-      const commonPoolKey = this.getPoolKey('common', toLang);
+      const commonPoolKey = this.getPoolKey('common', lang);
       const commonPool = this.pools.get(commonPoolKey);
       if (commonPool && commonPool.has(text)) {
-        return { found: true, translation: commonPool.get(text) };
+        return { found: true, fromCache: true, translation: commonPool.get(text) };
       }
     }
-    return { found: false };
+    return { found: false, fromCache: false };
   }
 
   /**
@@ -738,15 +758,29 @@ class TranslationPool {
   /**
    * Get the number of cached translations for a specific fingerprint and language
    * If language is not specified, uses current language
-   * @param fingerprint Fingerprint (default 'common')
+   * If fingerprint is not specified, returns total size across all fingerprints for current language
+   * @param fingerprint Fingerprint (optional, returns total if not specified)
    * @param toLang Target language (uses current if not specified)
    * @returns Number of cached translations
    */
-  getCacheSize(fingerprint = 'common', toLang?: string): number {
+  getCacheSize(fingerprint?: string, toLang?: string): number {
     const targetLang = toLang || this.currentToLang || 'en';
-    const poolKey = this.getPoolKey(fingerprint, targetLang);
-    const pool = this.pools.get(poolKey);
-    return pool?.size || 0;
+    
+    // If fingerprint is specified, return size for that specific pool
+    if (fingerprint) {
+      const poolKey = this.getPoolKey(fingerprint, targetLang);
+      const pool = this.pools.get(poolKey);
+      return pool?.size || 0;
+    }
+    
+    // If no fingerprint specified, return total size across all fingerprints for current language
+    let totalSize = 0;
+    for (const [poolKey, pool] of this.pools.entries()) {
+      if (poolKey.endsWith(`:${targetLang}`)) {
+        totalSize += pool.size;
+      }
+    }
+    return totalSize;
   }
 
   /**
@@ -833,6 +867,13 @@ class TranslationPool {
       keysToRemove.forEach(key => localStorage.removeItem(key));
     }
     console.log('[TranslationPool] Cleared all cached translations');
+  }
+
+  /**
+   * Alias for clearAll - clear entire cache
+   */
+  clearCache(): void {
+    this.clearAll();
   }
 
   /**
@@ -933,6 +974,7 @@ export type TranslationClientOptions = {
   baseUrl?: string;
   senseId: string;
   defaultFromLang?: string;
+  token?: string; // Authentication token for API access
   crossTab?: Partial<CrossTabOptions>;
   backgroundUpdate?: Partial<BackgroundUpdateOptions>;
   persistentStorage?: unknown;
@@ -940,23 +982,36 @@ export type TranslationClientOptions = {
 
 class TranslationClient {
   baseUrl: string;
-  client: PromiseClient<typeof TranslationService>;
+  token?: string;
+  client: any;
   transport: ReturnType<typeof createConnectTransport>;
   private pool: TranslationPool;
   private senseId: string;
   private defaultFromLang: string;
+  options: TranslationClientOptions;
 
   constructor(options: TranslationClientOptions) {
+    this.options = options;
     // If baseUrl is not provided, use the default production endpoint
     this.baseUrl = options.baseUrl
       ? options.baseUrl.replace(/\/$/, "")
       : "https://api.hottol.com/laker";
+    this.token = options.token;
     const baseUrl = this.baseUrl;
+    
+    // Create Connect transport with api-key-token header if token provided
     this.transport = createConnectTransport({
       baseUrl,
       useHttpGet: false,
+      interceptors: this.token ? [
+        (next) => async (req) => {
+          req.header.set('api-key-token', this.token);
+          return await next(req);
+        },
+      ] : undefined,
     });
-    this.client = createPromiseClient(TranslationService, this.transport);
+    
+    this.client = createClient(TranslationService, this.transport);
     
     this.senseId = options.senseId;
     this.defaultFromLang = options.defaultFromLang || 'en';
@@ -999,15 +1054,15 @@ class TranslationClient {
     }
     
     // Queue the request and wait for completion
-    const response = await this.pool.queueTranslationRequest({
-      text,
-      toLang,
-      fromLang: actualFromLang,
-      fingerprint: actualFingerprint,
-    });
-    
-    return response.translatedText;
-  }
+     const response = await this.pool.queueTranslationRequest({
+       text,
+       toLang,
+       fromLang: actualFromLang,
+       fingerprint: actualFingerprint,
+     });
+     
+     return response.translation[text] || text;
+   }
 
   /**
    * Translate text with full response details (direct API call, no caching)
@@ -1022,17 +1077,27 @@ class TranslationClient {
     toLang: string,
     fromLang?: string,
     fingerprint?: string
-  ): Promise<LLMTranslateResponse> {
-    const req = create(LLMTranslateRequestSchema, {
+  ): Promise<TranslateStreamResponse> {
+    // Use TranslateStream for translation - get the first response from the stream
+    const req = create(TranslateStreamRequestSchema, {
       text,
       toLang,
     });
     if (fromLang) {
       req.fromLang = fromLang;
     }
-    // Note: fingerprint is not supported in LLMTranslateRequest proto
-    // The fingerprint parameter is kept for API compatibility but not used
-    return this.client.lLMTranslate(req) as unknown as Promise<LLMTranslateResponse>;
+    if (fingerprint) {
+      req.fingerprint = fingerprint;
+    }
+    
+    // Get the first (and likely only) response from the stream
+    const stream = this.client.translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
+    for await (const response of stream) {
+      return response;
+    }
+    
+    // If no response, throw an error
+    throw new Error('No translation response received');
   }
 
   /**
@@ -1085,18 +1150,34 @@ class TranslationClient {
   }
 
   /**
-   * Get the underlying Connect RPC client for advanced use
-   * @returns The promise client instance
+   * Create a translation pool for preloading and caching translations
+   * @param senseId Semantic sense ID to create pool for
+   * @param options Pool configuration options
+   * @returns TranslationPool instance
    */
-  getClient(): PromiseClient<typeof TranslationService> {
+  createPool(senseId: string, options?: TranslationPoolOptions): TranslationPool {
+    return new TranslationPool(this, senseId, options);
+  }
+
+  /**
+   * Get the underlying Connect RPC client for advanced use
+   * @returns The client instance
+   */
+  getClient(): any {
     return this.client;
+  }
+
+  /**
+   * Get information about the current sense
+   * @returns Object containing sense ID and default settings
+   */
+  getSenseInfo(): { senseId: string; defaultFromLang: string } {
+    return {
+      senseId: this.senseId,
+      defaultFromLang: this.defaultFromLang,
+    };
   }
 }
 
-export {
-  TranslationPool,
-  TranslationClient,
-  extractTemplate,
-};
-
 export default TranslationClient;
+export { TranslationClient, TranslationPool };
