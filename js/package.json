@@ -1,6 +1,6 @@
 {
   "name": "@alaikis/translation-sdk",
-  "version": "1.6.122",
+  "version": "1.6.124",
   "description": "Translation Service Connect RPC JavaScript/TypeScript SDK",
   "type": "module",
   "main": "translation-client.cjs",

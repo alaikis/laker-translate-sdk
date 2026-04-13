@@ -1101,11 +1101,12 @@ class TranslationClient {
     this.options = options;
     // If baseUrl is not provided, use the default production endpoint
     // The baseUrl should include the API path prefix for Connect RPC
-    // Expected format: https://api.hottol.com/laker/api/v1/translate/rpc/stream
-    const defaultBaseUrl = "https://api.hottol.com/laker/api/v1/translate/rpc/stream";
+    // Expected format: https://api.hottol.com/laker
+    // cr = connect rpc - shorter and cleaner URL without dots
+    const defaultBaseUrl = "https://api.hottol.com/laker";
     this.baseUrl = options.baseUrl
-      ? options.baseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/stream"
-      : defaultBaseUrl;
+      ? options.baseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/cr"
+      : defaultBaseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/cr";
     this.token = options.token;
     
     // Use provided transport if available
@@ -1120,10 +1121,14 @@ class TranslationClient {
           'See documentation for details.'
         );
       }
-      const baseUrl = this.baseUrl;
       // Use JSON encoding because backend uses custom json codec (application/json)
       // This matches the backend registration: encoding.RegisterCodec(jsonCodec{}) with Name() = "json"
-      this.transport = createConnectTransport({
+      
+      // To avoid dots in URL path (translation.TranslationService has dots that can cause Nginx 404)
+      // We wrap the original transport to intercept the request and modify the URL
+      // Final: {baseUrl}/TranslateStream instead of {baseUrl}/translation.TranslationService/TranslateStream
+      const baseUrl = this.baseUrl;
+      const originalTransport = createConnectTransport({
         baseUrl,
         useHttpGet: false,
         useBinary: false,
@@ -1134,6 +1139,67 @@ class TranslationClient {
           },
         ] : undefined,
       });
+      
+      // The createConnectTransport builds URL as: baseUrl + '/' + serviceName + '/' + methodName
+      // We need: baseUrl + '/' + methodName (no serviceName to avoid dots)
+      // To achieve this, we intercept by monkey-patching URL constructor
+      // @ts-ignore - we use any for compatibility
+      this.transport = {
+        unary: (service, method, ...args) => {
+          // Monkey patch the URL constructor to remove the serviceName from the path
+          const OriginalURL = URL;
+          // @ts-ignore
+          globalThis.URL = function (input: string) {
+            // Input is full URL that connect built: baseUrl + '/' + service + '/' + method
+            // We need to remove the service part: /translation.TranslationService/TranslateStream -> /TranslateStream
+            const url = new OriginalURL(input);
+            const parts = url.pathname.split('/');
+            // Remove service name (it's the second last part)
+            if (parts.length >= 2) {
+              const secondLast = parts[parts.length - 2];
+              if (secondLast.includes('.')) { // If it contains dots, it's definitely the service name
+                parts.splice(parts.length - 2, 1);
+                url.pathname = parts.join('/');
+              }
+            }
+            return url;
+          };
+          
+          try {
+            // @ts-ignore
+            return originalTransport.unary(service, method, ...args);
+          } finally {
+            // Restore original URL constructor
+            // @ts-ignore
+            globalThis.URL = OriginalURL;
+          }
+        },
+        // @ts-ignore
+        stream: (service, method, ...args) => {
+          const OriginalURL = URL;
+          // @ts-ignore
+          globalThis.URL = function (input: string) {
+            const url = new OriginalURL(input);
+            const parts = url.pathname.split('/');
+            if (parts.length >= 2) {
+              const secondLast = parts[parts.length - 2];
+              if (secondLast.includes('.')) {
+                parts.splice(parts.length - 2, 1);
+                url.pathname = parts.join('/');
+              }
+            }
+            return url;
+          };
+          
+          try {
+            // @ts-ignore
+            return originalTransport.stream(service, method, ...args);
+          } finally {
+            // @ts-ignore
+            globalThis.URL = OriginalURL;
+          }
+        },
+      } as Transport;
     }
     
     this.client = createClient(TranslationService as any, this.transport);
