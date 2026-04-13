@@ -7,9 +7,11 @@
  *
  * This client uses Connect RPC for native HTTP streaming over HTTP/2
  * Supports true multiplexing on a single connection
+ * Supports both web browsers and Node.js
  */
-import { createConnectTransport } from '@connectrpc/connect-web';
-export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord, } from './gen/proto/translation_pb.js';
+import { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord } from './gen/translation_pb';
+import type { Transport } from '@connectrpc/connect';
+export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord, };
 export type GetSenseTranslateRequestOptions = {
     senseId: string;
     fingerprint?: string;
@@ -19,7 +21,6 @@ export type GetSenseTranslateRequestOptions = {
     dstLang?: string;
     dstLangs?: string[];
 };
-import type { GetSenseTranslateResponse, TranslateStreamResponse } from './gen/proto/translation_pb.js';
 /**
  * Automatic template extraction from text containing numeric variables
  * @param text Original text that may contain numeric variables
@@ -189,17 +190,29 @@ declare class TranslationPool {
     clearCache(): void;
     /**
      * Set the current active fingerprint
-     * Doesn't clear existing cache, just changes lookup priority
-     * When a new fingerprint is set and not loaded for current language,
-     * it will be loaded automatically during next initialize
+     * Automatically loads the new fingerprint's translations for the current language
      * @param fingerprint New fingerprint to set
+     * @param toLang Target language (optional, uses currentToLang if not provided)
      */
-    setCurrentFingerprint(fingerprint: string | null): void;
+    setCurrentFingerprint(fingerprint: string | null, toLang?: string): Promise<void>;
+    /**
+     * Set the current target language
+     * Automatically initializes the translation pool for the new language with common and current fingerprint
+     * Uses existing initialize() method that already handles both common and fingerprint loading
+     * @param toLang New target language
+     * @param fingerprint Optional fingerprint (uses current fingerprint if not provided)
+     */
+    setCurrentLanguage(toLang: string, fingerprint?: string | null): Promise<void>;
     /**
      * Get current active fingerprint
      * @returns Current fingerprint or null
      */
     getCurrentFingerprint(): string | null;
+    /**
+     * Get current target language
+     * @returns Current target language or null
+     */
+    getCurrentLanguage(): string | null;
     /**
      * Start background update checker that periodically checks for stale translations
      * Only runs if background update is enabled
@@ -229,12 +242,13 @@ export type TranslationClientOptions = {
     crossTab?: Partial<CrossTabOptions>;
     backgroundUpdate?: Partial<BackgroundUpdateOptions>;
     persistentStorage?: unknown;
+    transport?: Transport;
 };
 declare class TranslationClient {
     baseUrl: string;
     token?: string;
     client: any;
-    transport: ReturnType<typeof createConnectTransport>;
+    transport: Transport;
     private pool;
     private senseId;
     private defaultFromLang;
@@ -242,6 +256,7 @@ declare class TranslationClient {
     constructor(options: TranslationClientOptions);
     /**
      * Simple one-shot translation - automatically handles caching, initialization, and queuing
+     * Auto-detects fingerprint and language changes, automatically loads new translation pool
      * @param text Original text to translate
      * @param toLang Target language code
      * @param fromLang Source language code (optional, defaults to client default)
@@ -251,6 +266,7 @@ declare class TranslationClient {
     translate(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<string>;
     /**
      * Translate text with full response details (direct API call, no caching)
+     * Auto-detects fingerprint if not provided
      * @param text Original text to translate
      * @param toLang Target language code
      * @param fromLang Source language code (optional, defaults to client default)
@@ -269,7 +285,7 @@ declare class TranslationClient {
      */
     translateStream(senseId: string, dstLang: string, fingerprint?: string): AsyncIterable<TranslateStreamResponse>;
     /**
-     * Get paged list of translations for a semantic sense with optional filtering
+     Get paged list of translations for a semantic sense with optional filtering
      * @param options Request options including filtering, pagination
      * @returns Promise with filtered, paged translations
      */

@@ -7,20 +7,50 @@
  *
  * This client uses Connect RPC for native HTTP streaming over HTTP/2
  * Supports true multiplexing on a single connection
+ * Supports both web browsers and Node.js
  */
 
 // Import generated Connect RPC code
 import {
-  GetSenseTranslateRequestSchema,
-  GetSenseTranslateResponseSchema,
-  TranslateStreamRequestSchema,
-  TranslateStreamResponseSchema,
-  TranslateRecordSchema,
-  TranslationService,
-} from './gen/proto/translation_pb.js';
-import { createClient, type Client } from '@connectrpc/connect';
-import { createConnectTransport } from '@connectrpc/connect-web';
-import { create } from '@bufbuild/protobuf';
+  GetSenseTranslateRequest,
+  GetSenseTranslateResponse,
+  TranslateStreamRequest,
+  TranslateStreamResponse,
+  TranslateRecord,
+} from './gen/translation_pb';
+import { TranslationService } from './gen/translation_connect';
+import { createClient } from '@connectrpc/connect';
+import type { Transport } from '@connectrpc/connect';
+
+// Detect environment and import appropriate transport factory dynamically
+import type { createConnectTransport as CCTBrowser } from '@connectrpc/connect-web';
+import type { createConnectTransport as CCTNode } from '@connectrpc/connect-node';
+
+let createConnectTransport: (options: any) => Transport;
+
+// Need to handle differently based on module format
+if (typeof fetch === 'function' && typeof window !== 'undefined') {
+  // Browser environment - use connect-web (based on fetch API)
+  // In browsers, bundlers can handle this as ESM
+  if (typeof require !== 'undefined') {
+    ({ createConnectTransport } = require('@connectrpc/connect-web'));
+  } else {
+    // For pure ESM environments
+    import('@connectrpc/connect-web').then(mod => {
+      createConnectTransport = mod.createConnectTransport as any;
+    });
+  }
+} else {
+  // Node.js environment - use connect-node (based on Node.js HTTP/2)
+  if (typeof require !== 'undefined') {
+    ({ createConnectTransport } = require('@connectrpc/connect-node'));
+  } else {
+    // For pure ESM environments
+    import('@connectrpc/connect-node').then(mod => {
+      createConnectTransport = mod.createConnectTransport as any;
+    });
+  }
+}
 
 // Re-export all types from generated code
 export type {
@@ -29,7 +59,7 @@ export type {
   TranslateStreamRequest,
   TranslateStreamResponse,
   TranslateRecord,
-} from './gen/proto/translation_pb.js';
+};
 
 export type GetSenseTranslateRequestOptions = {
   senseId: string;
@@ -40,12 +70,6 @@ export type GetSenseTranslateRequestOptions = {
   dstLang?: string;
   dstLangs?: string[];
 };
-
-// Re-export response types from generated code
-import type {
-  GetSenseTranslateResponse,
-  TranslateStreamResponse,
-} from './gen/proto/translation_pb.js';
 
 const defaultCrossTabOptions = {
   enabled: false,
@@ -479,17 +503,17 @@ class TranslationPool {
 
     results.forEach(({ text, translation }, index) => {
       this.addTranslation(text, translation);
-      const queuedReq = requestsToProcess[index];
-      if (queuedReq && queuedReq.resolveFunction) {
-        const response = create(TranslateStreamResponseSchema, {
-          originalText: text,
-          translation: { [text]: translation },
-          timestamp: BigInt(Date.now()),
-          finished: true,
-          batchIndex: 0,
-        });
-        queuedReq.resolveFunction(response);
-        const key = `${text}-${queuedReq.fingerprint || 'common'}`;
+       const queuedReq = requestsToProcess[index];
+       if (queuedReq && queuedReq.resolveFunction) {
+         const response = TranslateStreamResponse.fromJson({
+           originalText: text,
+           translation: { [text]: translation },
+           timestamp: Date.now(),
+           finished: true,
+           batchIndex: 0,
+         });
+         queuedReq.resolveFunction(response);
+         const key = `${text}-${queuedReq.fingerprint || 'common'}`;
         delete this.pendingResolutions[key];
         if (this.onTranslationUpdated) {
           this.onTranslationUpdated(text, translation);
@@ -590,7 +614,7 @@ class TranslationPool {
     let updatedCount = 0;
     let addedCount = 0;
 
-    const req = create(TranslateStreamRequestSchema, {
+    const req = TranslateStreamRequest.fromJson({
       senseId: this.senseId,
       fingerprint,
       dstLang: toLang,
@@ -619,23 +643,23 @@ class TranslationPool {
         pool?.set(text, translateStr);
         const key = `${text}-${fp}`;
         if (this.pendingResolutions[key]) {
-          const responseObj = create(TranslateStreamResponseSchema, {
-            originalText: text,
-            translation: { [text]: translateStr },
-            timestamp: BigInt(Date.now()),
-            finished: true,
-            batchIndex: 0,
-          });
+            const responseObj = TranslateStreamResponse.fromJson({
+              originalText: text,
+              translation: { [text]: translateStr },
+              timestamp: Date.now(),
+              finished: true,
+              batchIndex: 0,
+            });
           this.pendingResolutions[key].resolveList.forEach(resolve => resolve(responseObj));
           delete this.pendingResolutions[key];
         }
         if (fp !== 'common') {
           const commonKey = `${text}-common`;
           if (this.pendingResolutions[commonKey]) {
-            const responseObj = create(TranslateStreamResponseSchema, {
+            const responseObj = TranslateStreamResponse.fromJson({
               originalText: text,
               translation: { [text]: translateStr },
-              timestamp: BigInt(Date.now()),
+              timestamp: Date.now(),
               finished: true,
               batchIndex: 0,
             });
@@ -878,15 +902,52 @@ class TranslationPool {
 
   /**
    * Set the current active fingerprint
-   * Doesn't clear existing cache, just changes lookup priority
-   * When a new fingerprint is set and not loaded for current language,
-   * it will be loaded automatically during next initialize
+   * Automatically loads the new fingerprint's translations for the current language
    * @param fingerprint New fingerprint to set
+   * @param toLang Target language (optional, uses currentToLang if not provided)
    */
-  setCurrentFingerprint(fingerprint: string | null): void {
+  async setCurrentFingerprint(fingerprint: string | null, toLang?: string): Promise<void> {
+    const targetLang = toLang || this.currentToLang;
+    const oldFingerprint = this.currentFingerprint;
+    
     this.currentFingerprint = fingerprint;
     this.currentLanguageVersion++;
-    console.log(`[TranslationPool] Changed current fingerprint to: ${fingerprint}`);
+    console.log(`[TranslationPool] Changed current fingerprint from ${oldFingerprint} to: ${fingerprint}`);
+    
+    // If we have a target language and the fingerprint changed, load the new fingerprint's translations
+    if (targetLang && fingerprint && fingerprint !== oldFingerprint) {
+      const fpPoolKey = this.getPoolKey(fingerprint, targetLang);
+      if (!this.loadedCombinations.has(fpPoolKey)) {
+        console.log(`[TranslationPool] Auto-loading translations for new fingerprint: ${fingerprint}`);
+        await this.loadFingerprintTranslations(fingerprint, fingerprint, targetLang);
+        console.log(`[TranslationPool] Loaded translations for fingerprint: ${fingerprint} (${targetLang})`);
+      }
+    }
+  }
+
+  /**
+   * Set the current target language
+   * Automatically initializes the translation pool for the new language with common and current fingerprint
+   * Uses existing initialize() method that already handles both common and fingerprint loading
+   * @param toLang New target language
+   * @param fingerprint Optional fingerprint (uses current fingerprint if not provided)
+   */
+  async setCurrentLanguage(toLang: string, fingerprint?: string | null): Promise<void> {
+    const newLang = toLang;
+    const oldLang = this.currentToLang;
+    
+    // Update fingerprint if provided
+    if (fingerprint !== undefined && fingerprint !== this.currentFingerprint) {
+      this.currentFingerprint = fingerprint;
+    }
+    
+    this.currentToLang = newLang;
+    this.currentLanguageVersion++;
+    console.log(`[TranslationPool] Changed current target language from ${oldLang} to: ${newLang}`);
+    
+    // Full initialize for the new language - this properly loads both common and current fingerprint
+    // The existing initialize method already has the correct logic
+    await this.initialize(newLang);
   }
 
   /**
@@ -895,6 +956,14 @@ class TranslationPool {
    */
   getCurrentFingerprint(): string | null {
     return this.currentFingerprint;
+  }
+
+  /**
+   * Get current target language
+   * @returns Current target language or null
+   */
+  getCurrentLanguage(): string | null {
+    return this.currentToLang;
   }
 
   /**
@@ -978,13 +1047,14 @@ export type TranslationClientOptions = {
   crossTab?: Partial<CrossTabOptions>;
   backgroundUpdate?: Partial<BackgroundUpdateOptions>;
   persistentStorage?: unknown;
+  transport?: Transport; // Optional: provide an already created transport for advanced use cases
 };
 
 class TranslationClient {
   baseUrl: string;
   token?: string;
   client: any;
-  transport: ReturnType<typeof createConnectTransport>;
+  transport: Transport;
   private pool: TranslationPool;
   private senseId: string;
   private defaultFromLang: string;
@@ -993,25 +1063,40 @@ class TranslationClient {
   constructor(options: TranslationClientOptions) {
     this.options = options;
     // If baseUrl is not provided, use the default production endpoint
+    // The baseUrl should include the API path prefix for Connect RPC
+    // Expected format: https://api.hottol.com/laker/api/v1/translate/rpc/stream
+    const defaultBaseUrl = "https://api.hottol.com/laker/api/v1/translate/rpc/stream";
     this.baseUrl = options.baseUrl
-      ? options.baseUrl.replace(/\/$/, "")
-      : "https://api.hottol.com/laker";
+      ? options.baseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/stream"
+      : defaultBaseUrl;
     this.token = options.token;
-    const baseUrl = this.baseUrl;
     
-    // Create Connect transport with api-key-token header if token provided
-    this.transport = createConnectTransport({
-      baseUrl,
-      useHttpGet: false,
-      interceptors: this.token ? [
-        (next) => async (req) => {
-          req.header.set('api-key-token', this.token);
-          return await next(req);
-        },
-      ] : undefined,
-    });
+    // Use provided transport if available
+    if (options.transport) {
+      this.transport = options.transport;
+    } else {
+      // Create Connect transport with api-key-token header if token provided
+      if (!createConnectTransport) {
+        throw new Error(
+          'createConnectTransport is not initialized. If you are using pure ESM in Node.js, ' +
+          'you need to manually create and provide the transport. ' +
+          'See documentation for details.'
+        );
+      }
+      const baseUrl = this.baseUrl;
+      this.transport = createConnectTransport({
+        baseUrl,
+        useHttpGet: false,
+        interceptors: this.token ? [
+          (next) => async (req) => {
+            req.header.set('api-key-token', this.token);
+            return await next(req);
+          },
+        ] : undefined,
+      });
+    }
     
-    this.client = createClient(TranslationService, this.transport);
+    this.client = createClient(TranslationService as any, this.transport);
     
     this.senseId = options.senseId;
     this.defaultFromLang = options.defaultFromLang || 'en';
@@ -1026,6 +1111,7 @@ class TranslationClient {
 
   /**
    * Simple one-shot translation - automatically handles caching, initialization, and queuing
+   * Auto-detects fingerprint and language changes, automatically loads new translation pool
    * @param text Original text to translate
    * @param toLang Target language code
    * @param fromLang Source language code (optional, defaults to client default)
@@ -1040,10 +1126,27 @@ class TranslationClient {
   ): Promise<string> {
     // Use defaults if not provided
     const actualFromLang = fromLang || this.defaultFromLang;
-    const actualFingerprint = fingerprint || 'common';
+    // Use current fingerprint from pool if not provided, fallback to 'common'
+    const actualFingerprint = fingerprint ?? this.pool.getCurrentFingerprint() ?? 'common';
+    
+    // Check if the target language has changed from current, auto-switch
+    const currentLang = this.pool.getCurrentLanguage();
+    if (currentLang !== toLang) {
+      // Language changed, auto-load the new language for the current fingerprint
+      console.log(`[TranslationClient] Language changed from ${currentLang} to ${toLang}, auto-loading translation pool`);
+      await this.pool.setCurrentLanguage(toLang, actualFingerprint);
+    }
+    
+    // If fingerprint changed from current, auto-load it
+    const currentFingerprint = this.pool.getCurrentFingerprint();
+    if (fingerprint !== undefined && fingerprint !== currentFingerprint) {
+      // Fingerprint changed, update current and auto-load for current language
+      console.log(`[TranslationClient] Fingerprint changed from ${currentFingerprint} to ${fingerprint}, auto-loading translations`);
+      await this.pool.setCurrentFingerprint(fingerprint, toLang);
+    }
     
     // Check cache first
-    const lookup = this.pool.lookup(text, actualFingerprint);
+    const lookup = this.pool.lookup(text, actualFingerprint, toLang);
     if (lookup.found && lookup.translation) {
       return lookup.translation;
     }
@@ -1066,29 +1169,31 @@ class TranslationClient {
 
   /**
    * Translate text with full response details (direct API call, no caching)
+   * Auto-detects fingerprint if not provided
    * @param text Original text to translate
    * @param toLang Target language code
    * @param fromLang Source language code (optional, defaults to client default)
    * @param fingerprint Text fingerprint for domain-specific translations
    * @returns Promise with complete translation response
    */
-  async translateWithDetails(
-    text: string,
-    toLang: string,
-    fromLang?: string,
-    fingerprint?: string
-  ): Promise<TranslateStreamResponse> {
-    // Use TranslateStream for translation - get the first response from the stream
-    const req = create(TranslateStreamRequestSchema, {
+    async translateWithDetails(
+      text: string,
+      toLang: string,
+      fromLang?: string,
+      fingerprint?: string
+    ): Promise<TranslateStreamResponse> {
+      // Use defaults if not provided
+      const actualFromLang = fromLang || this.defaultFromLang;
+      // Use current fingerprint from pool if not provided
+      const actualFingerprint = fingerprint ?? this.pool.getCurrentFingerprint() ?? 'common';
+      
+      // Use TranslateStream for translation - get the first response from the stream
+     const req = TranslateStreamRequest.fromJson({
       text,
-      toLang,
-    });
-    if (fromLang) {
-      req.fromLang = fromLang;
-    }
-    if (fingerprint) {
-      req.fingerprint = fingerprint;
-    }
+      toLang: toLang,
+      fromLang: actualFromLang,
+      fingerprint: actualFingerprint,
+     });
     
     // Get the first (and likely only) response from the stream
     const stream = this.client.translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
@@ -1114,7 +1219,7 @@ class TranslationClient {
     dstLang: string,
     fingerprint?: string
   ): AsyncIterable<TranslateStreamResponse> {
-    const req = create(TranslateStreamRequestSchema, {
+    const req = TranslateStreamRequest.fromJson({
       senseId,
       dstLang,
     });
@@ -1125,14 +1230,14 @@ class TranslationClient {
   }
 
   /**
-   * Get paged list of translations for a semantic sense with optional filtering
+   Get paged list of translations for a semantic sense with optional filtering
    * @param options Request options including filtering, pagination
    * @returns Promise with filtered, paged translations
    */
   async getSenseTranslations(
     options: GetSenseTranslateRequestOptions
   ): Promise<GetSenseTranslateResponse> {
-    const req = create(GetSenseTranslateRequestSchema, {
+    const req = GetSenseTranslateRequest.fromJson({
       senseId: options.senseId,
     });
     if (options.fingerprint !== undefined) {
