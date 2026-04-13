@@ -1101,12 +1101,13 @@ class TranslationClient {
     this.options = options;
     // If baseUrl is not provided, use the default production endpoint
     // The baseUrl should include the API path prefix for Connect RPC
+    // New route structure: /api/v1/rpc/cr/<service>/<method>
     // Expected format: https://api.hottol.com/laker
-    // cr = connect rpc - shorter and cleaner URL without dots
+    // All connect rpc requests start with /api/v1/rpc/cr/ for easier routing management
     const defaultBaseUrl = "https://api.hottol.com/laker";
     this.baseUrl = options.baseUrl
-      ? options.baseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/cr"
-      : defaultBaseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/cr";
+      ? options.baseUrl.replace(/\/$/, "") + "/api/v1/rpc/cr/translate"
+      : defaultBaseUrl.replace(/\/$/, "") + "/api/v1/rpc/cr/translate";
     this.token = options.token;
     
     // Use provided transport if available
