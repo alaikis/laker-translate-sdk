@@ -5192,8 +5192,8 @@ class TranslationClient {
         this.options = options;
         // If baseUrl is not provided, use the default production endpoint
         // The baseUrl should include the API path prefix for Connect RPC
-        // Expected format: https://api.laker.dev/api/v1/translate/rpc/stream
-        const defaultBaseUrl = "https://api.laker.dev/api/v1/translate/rpc/stream";
+        // Expected format: https://api.hottol.com/laker/api/v1/translate/rpc/stream
+        const defaultBaseUrl = "https://api.hottol.com/laker/api/v1/translate/rpc/stream";
         this.baseUrl = options.baseUrl
             ? options.baseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/stream"
             : defaultBaseUrl;
