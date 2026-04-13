@@ -23,6 +23,7 @@ export type GetSenseTranslateRequestOptions = {
 };
 /**
  * Automatic template extraction from text containing numeric variables
+ * Also handles existing {varName} style templates
  * @param text Original text that may contain numeric variables
  * @returns Template extraction result
  */
@@ -32,6 +33,14 @@ export declare function extractTemplate(text: string): {
     dstTemplate: string;
     variables: string[];
 };
+/**
+ * Merge template with variables
+ * @param template Template with {variable} placeholders
+ * @param vars Object mapping variable names to values
+ * @returns Merged text with variables substituted
+ */
+export declare function mergeTemplate(template: string, vars: Record<string, string | number>): string;
+export declare const version = "1.6.121";
 type CrossTabOptions = {
     enabled: boolean;
     channelName: string;
@@ -273,7 +282,7 @@ declare class TranslationClient {
      * @param fingerprint Text fingerprint for domain-specific translations
      * @returns Promise with complete translation response
      */
-    translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<TranslateStreamResponse>;
+    translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string, timeoutMs?: number): Promise<TranslateStreamResponse>;
     /**
      * Stream translation batches for a semantic sense
      * Uses native Connect RPC streaming with true multiplexing

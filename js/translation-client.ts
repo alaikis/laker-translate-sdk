@@ -22,24 +22,22 @@ import { TranslationService } from './gen/translation_connect';
 import { createClient } from '@connectrpc/connect';
 import type { Transport } from '@connectrpc/connect';
 
-// Detect environment and import appropriate transport factory dynamically
+// For browser environments, we statically import connect-web
+// because it's already external in the rollup config and user's project has it installed
+// This ensures createConnectTransport is available synchronously
+import { createConnectTransport as browserCreateConnectTransport } from '@connectrpc/connect-web';
 import type { createConnectTransport as CCTBrowser } from '@connectrpc/connect-web';
 import type { createConnectTransport as CCTNode } from '@connectrpc/connect-node';
 
 let createConnectTransport: (options: any) => Transport;
 
-// Need to handle differently based on module format
-if (typeof fetch === 'function' && typeof window !== 'undefined') {
-  // Browser environment - use connect-web (based on fetch API)
-  // In browsers, bundlers can handle this as ESM
-  if (typeof require !== 'undefined') {
-    ({ createConnectTransport } = require('@connectrpc/connect-web'));
-  } else {
-    // For pure ESM environments
-    import('@connectrpc/connect-web').then(mod => {
-      createConnectTransport = mod.createConnectTransport as any;
-    });
-  }
+// Check if browser already preloaded the transport (for IIFE standalone build)
+if (typeof window !== 'undefined' && (window as any).__LAKER_BROWSER_TRANSPORT) {
+  createConnectTransport = (window as any).__LAKER_BROWSER_TRANSPORT;
+} else if (typeof fetch === 'function' && typeof window !== 'undefined') {
+  // Browser environment (Vite/Webpack ESM or CJS build) - use statically imported version
+  // User's project already has @connectrpc/connect-web as dependency so it's available
+  createConnectTransport = browserCreateConnectTransport;
 } else {
   // Node.js environment - use connect-node (based on Node.js HTTP/2)
   if (typeof require !== 'undefined') {
@@ -83,6 +81,7 @@ const defaultTranslationPoolOptions = {
 
 /**
  * Automatic template extraction from text containing numeric variables
+ * Also handles existing {varName} style templates
  * @param text Original text that may contain numeric variables
  * @returns Template extraction result
  */
@@ -92,30 +91,62 @@ export function extractTemplate(text: string): {
   dstTemplate: string;
   variables: string[];
 } {
-  const numberRegex = /\d+(?:\.\d+)?/g;
-  const matches = text.match(numberRegex);
-  if (!matches || matches.length === 0) {
-    return {
-      isTemplated: false,
-      srcTemplate: text,
-      dstTemplate: '',
-      variables: [],
-    };
-  }
-  let template = text;
+  let result = text;
   const variables: string[] = [];
-  matches.forEach((match, index) => {
-    const varName = `{var${index + 1}}`;
-    template = template.replace(match, varName);
-    variables.push(match);
-  });
+
+  // First, extract existing {name} style templates
+  const braceRegex = /\{([^}]+)\}/g;
+  let braceMatch: RegExpExecArray | null;
+  let lastIndex = 0;
+  // We need to build a new string with the braces kept, but collect the variable names
+  // For existing brace templates, we just extract their names as variables
+  while ((braceMatch = braceRegex.exec(result)) !== null) {
+    const varName = braceMatch[1];
+    if (varName) {
+      variables.push(varName);
+    }
+  }
+
+  // If no existing brace templates, look for numeric variables to convert
+  if (variables.length === 0) {
+    const numberRegex = /\d+(?:\.\d+)?/g;
+    const matches = text.match(numberRegex);
+    if (matches && matches.length > 0) {
+      let template = text;
+      matches.forEach((match, index) => {
+        const value = match;
+        const varName = `var${index + 1}`;
+        template = template.replace(match, `{${varName}}`);
+        variables.push(value);
+        result = template;
+      });
+    }
+  }
+
   return {
     isTemplated: variables.length > 0,
-    srcTemplate: template,
+    srcTemplate: result,
     dstTemplate: '',
     variables,
   };
 }
+
+/**
+ * Merge template with variables
+ * @param template Template with {variable} placeholders
+ * @param vars Object mapping variable names to values
+ * @returns Merged text with variables substituted
+ */
+export function mergeTemplate(template: string, vars: Record<string, string | number>): string {
+  let result = template;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replace(new RegExp(`\\{${key}\\}`, 'g'), String(value));
+  }
+  return result;
+}
+
+// Version from package.json
+export const version = '1.6.121';
 
 type CrossTabOptions = {
   enabled: boolean;
@@ -465,15 +496,11 @@ class TranslationPool {
     ): Promise<{ text: string; translation: string; success: boolean }> => {
       try {
          const lookup = this.lookup(req.text, req.fingerprint);
-         if (lookup.found) {
-           const response = await this.client.translateWithDetails(
-             req.text,
-             req.toLang,
-             req.fromLang,
-             req.fingerprint
-           );
-           return { text: req.text, translation: response.translation[req.text] || req.text, success: true };
+         if (lookup.found && lookup.translation) {
+           // Already in cache, use cached value directly - no need to request
+           return { text: req.text, translation: lookup.translation, success: true };
          } else {
+           // Not in cache, need to request from server
            const response = await this.client.translateWithDetails(
              req.text,
              req.toLang,
@@ -570,23 +597,20 @@ class TranslationPool {
 
   async initialize(toLang: string): Promise<void> {
     if (this.loading) {
+      console.log(`[TranslationPool] Already loading, skipping duplicate initialize`);
       return;
     }
     this.loading = true;
     this.currentToLang = toLang;
     try {
       console.log(`[TranslationPool] Starting pool initialization... (toLang: ${toLang})`);
-      const commonPoolKey = this.getPoolKey('common', toLang);
-      if (!this.loadedCombinations.has(commonPoolKey)) {
-        await this.loadFingerprintTranslations('common', undefined, toLang);
-        console.log(`[TranslationPool] Common translations loaded for ${toLang}`);
-      }
+      console.log(`[TranslationPool] Force reloading all translations from server for cache synchronization`);
+      // Always load from server regardless of local cache to ensure cache synchronization
+      await this.loadFingerprintTranslations('common', undefined, toLang);
+      console.log(`[TranslationPool] Common translations loaded for ${toLang}`);
       if (this.currentFingerprint) {
-        const fpPoolKey = this.getPoolKey(this.currentFingerprint, toLang);
-        if (!this.loadedCombinations.has(fpPoolKey)) {
-          await this.loadFingerprintTranslations(this.currentFingerprint, this.currentFingerprint, toLang);
-          console.log(`[TranslationPool] ${this.currentFingerprint} translations loaded for ${toLang}`);
-        }
+        await this.loadFingerprintTranslations(this.currentFingerprint, this.currentFingerprint, toLang);
+        console.log(`[TranslationPool] ${this.currentFingerprint} translations loaded for ${toLang}`);
       }
       this.broadcastUpdate();
       console.log(`[TranslationPool] Pool initialization completed for ${toLang}`);
@@ -594,6 +618,9 @@ class TranslationPool {
         this.onPoolInitialized();
       }
       await this.processQueuedRequests();
+    } catch (error) {
+      console.error(`[TranslationPool] Pool initialization failed for ${toLang}:`, error);
+      throw error;
     } finally {
       this.loading = false;
     }
@@ -604,6 +631,7 @@ class TranslationPool {
     fingerprint: string | undefined,
     toLang: string
   ): Promise<void> {
+    console.log(`[TranslationPool] Loading translations for fingerprint=${fp}, toLang=${toLang}...`);
     const poolKey = this.getPoolKey(fp, toLang);
     this.loadLanguageFromStorage(fp, toLang);
     let pool = this.pools.get(poolKey);
@@ -614,70 +642,81 @@ class TranslationPool {
     let updatedCount = 0;
     let addedCount = 0;
 
-    const req = TranslateStreamRequest.fromJson({
+    const jsonRequest: any = {
       senseId: this.senseId,
-      fingerprint,
       dstLang: toLang,
-    });
-
+    };
     if (fingerprint) {
-      req.fingerprint = fingerprint;
+      jsonRequest.fingerprint = fingerprint;
     }
+    const req = TranslateStreamRequest.fromJson(jsonRequest);
 
-    const stream = (this.client.client as any).translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
-    for await (const response of stream) {
-      if (!response.translation) continue;
+    console.log(`[TranslationPool] Sending batch initialization request:`, jsonRequest);
 
-      Object.entries(response.translation).forEach(([text, translate]) => {
-        // Skip empty keys or error placeholder keys
-        if (!text || text === 'error') {
-          return;
-        }
-        const translateStr = translate as string;
-        const existing = pool?.get(text);
-        if (existing === undefined) {
-          addedCount++;
-        } else if (existing !== translateStr) {
-          updatedCount++;
-        }
-        pool?.set(text, translateStr);
-        const key = `${text}-${fp}`;
-        if (this.pendingResolutions[key]) {
-            const responseObj = TranslateStreamResponse.fromJson({
-              originalText: text,
-              translation: { [text]: translateStr },
-              timestamp: Date.now(),
-              finished: true,
-              batchIndex: 0,
-            });
-          this.pendingResolutions[key].resolveList.forEach(resolve => resolve(responseObj));
-          delete this.pendingResolutions[key];
-        }
-        if (fp !== 'common') {
-          const commonKey = `${text}-common`;
-          if (this.pendingResolutions[commonKey]) {
-            const responseObj = TranslateStreamResponse.fromJson({
-              originalText: text,
-              translation: { [text]: translateStr },
-              timestamp: Date.now(),
-              finished: true,
-              batchIndex: 0,
-            });
-            this.pendingResolutions[commonKey].resolveList.forEach(resolve => resolve(responseObj));
-            delete this.pendingResolutions[commonKey];
+    try {
+      const stream = (this.client.client as any).translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
+      let batchCount = 0;
+      for await (const response of stream) {
+        batchCount++;
+        console.log(`[TranslationPool] Received batch #${batchCount}, ${Object.keys(response.translation || {}).length} entries`);
+        if (!response.translation) continue;
+
+        Object.entries(response.translation).forEach(([text, translate]) => {
+          // Skip empty keys or error placeholder keys
+          if (!text || text === 'error') {
+            return;
           }
-        }
-        if (this.onTranslationLoaded) {
-          this.onTranslationLoaded(text, translateStr);
-        }
-      });
-    }
+          const translateStr = translate as string;
+          const existing = pool?.get(text);
+          if (existing === undefined) {
+            addedCount++;
+          } else if (existing !== translateStr) {
+            updatedCount++;
+          }
+          pool?.set(text, translateStr);
+          const key = `${text}-${fp}`;
+          if (this.pendingResolutions[key]) {
+              const responseObj = TranslateStreamResponse.fromJson({
+                originalText: text,
+                translation: { [text]: translateStr },
+                timestamp: Date.now(),
+                finished: true,
+                batchIndex: 0,
+              });
+            this.pendingResolutions[key].resolveList.forEach(resolve => resolve(responseObj));
+            delete this.pendingResolutions[key];
+          }
+          if (fp !== 'common') {
+            const commonKey = `${text}-common`;
+            if (this.pendingResolutions[commonKey]) {
+              const responseObj = TranslateStreamResponse.fromJson({
+                originalText: text,
+                translation: { [text]: translateStr },
+                timestamp: Date.now(),
+                finished: true,
+                batchIndex: 0,
+              });
+              this.pendingResolutions[commonKey].resolveList.forEach(resolve => resolve(responseObj));
+              delete this.pendingResolutions[commonKey];
+            }
+          }
+          if (this.onTranslationLoaded) {
+            this.onTranslationLoaded(text, translateStr);
+          }
+        });
+      }
 
-    this.saveToStorage(fp, toLang);
-    if (updatedCount > 0 || addedCount > 0) {
-      console.log(`[TranslationPool] Loaded ${fp}:${toLang} - added ${addedCount}, updated ${updatedCount} from remote`);
+      this.saveToStorage(fp, toLang);
+      if (updatedCount > 0 || addedCount > 0) {
+        console.log(`[TranslationPool] Loaded ${fp}:${toLang} - added ${addedCount}, updated ${updatedCount} from remote`);
+      } else {
+        console.log(`[TranslationPool] Finished loading ${fp}:${toLang} - no new entries added`);
+      }
+      this.loadedCombinations.add(poolKey);
+    } catch (error) {
+      console.error(`[TranslationPool] Failed to load ${fp}:${toLang} from server:`, error);
+      throw error;
     }
-    this.loadedCombinations.add(poolKey);
   }
 
   addPreloadedTranslations(preloaded: Record<string, Record<string, Record<string, string>>>): void {
@@ -906,24 +945,22 @@ class TranslationPool {
    * @param fingerprint New fingerprint to set
    * @param toLang Target language (optional, uses currentToLang if not provided)
    */
-  async setCurrentFingerprint(fingerprint: string | null, toLang?: string): Promise<void> {
-    const targetLang = toLang || this.currentToLang;
-    const oldFingerprint = this.currentFingerprint;
-    
-    this.currentFingerprint = fingerprint;
-    this.currentLanguageVersion++;
-    console.log(`[TranslationPool] Changed current fingerprint from ${oldFingerprint} to: ${fingerprint}`);
-    
-    // If we have a target language and the fingerprint changed, load the new fingerprint's translations
-    if (targetLang && fingerprint && fingerprint !== oldFingerprint) {
-      const fpPoolKey = this.getPoolKey(fingerprint, targetLang);
-      if (!this.loadedCombinations.has(fpPoolKey)) {
-        console.log(`[TranslationPool] Auto-loading translations for new fingerprint: ${fingerprint}`);
-        await this.loadFingerprintTranslations(fingerprint, fingerprint, targetLang);
-        console.log(`[TranslationPool] Loaded translations for fingerprint: ${fingerprint} (${targetLang})`);
-      }
-    }
-  }
+   async setCurrentFingerprint(fingerprint: string | null, toLang?: string): Promise<void> {
+     const targetLang = toLang || this.currentToLang;
+     const oldFingerprint = this.currentFingerprint;
+     
+     this.currentFingerprint = fingerprint;
+     this.currentLanguageVersion++;
+     console.log(`[TranslationPool] Changed current fingerprint from ${oldFingerprint} to: ${fingerprint}`);
+     
+     // If we have a target language and the fingerprint changed, always load from server
+     // to ensure cache synchronization
+     if (targetLang && fingerprint && fingerprint !== oldFingerprint) {
+       console.log(`[TranslationPool] Force loading translations for fingerprint: ${fingerprint} (${targetLang}) from server`);
+       await this.loadFingerprintTranslations(fingerprint, fingerprint, targetLang);
+       console.log(`[TranslationPool] Loaded translations for fingerprint: ${fingerprint} (${targetLang})`);
+     }
+   }
 
   /**
    * Set the current target language
@@ -1064,8 +1101,8 @@ class TranslationClient {
     this.options = options;
     // If baseUrl is not provided, use the default production endpoint
     // The baseUrl should include the API path prefix for Connect RPC
-    // Expected format: https://api.hottol.com/laker/api/v1/translate/rpc/stream
-    const defaultBaseUrl = "https://api.hottol.com/laker/api/v1/translate/rpc/stream";
+    // Expected format: https://api.laker.dev/api/v1/translate/rpc/stream
+    const defaultBaseUrl = "https://api.laker.dev/api/v1/translate/rpc/stream";
     this.baseUrl = options.baseUrl
       ? options.baseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/stream"
       : defaultBaseUrl;
@@ -1084,9 +1121,12 @@ class TranslationClient {
         );
       }
       const baseUrl = this.baseUrl;
+      // Use JSON encoding because backend uses custom json codec (application/json)
+      // This matches the backend registration: encoding.RegisterCodec(jsonCodec{}) with Name() = "json"
       this.transport = createConnectTransport({
         baseUrl,
         useHttpGet: false,
+        useBinary: false,
         interceptors: this.token ? [
           (next) => async (req) => {
             req.header.set('api-key-token', this.token);
@@ -1180,30 +1220,68 @@ class TranslationClient {
       text: string,
       toLang: string,
       fromLang?: string,
-      fingerprint?: string
+      fingerprint?: string,
+      timeoutMs: number = 30000
     ): Promise<TranslateStreamResponse> {
       // Use defaults if not provided
       const actualFromLang = fromLang || this.defaultFromLang;
       // Use current fingerprint from pool if not provided
       const actualFingerprint = fingerprint ?? this.pool.getCurrentFingerprint() ?? 'common';
       
-      // Use TranslateStream for translation - get the first response from the stream
+      // Use TranslateStream for translation - accumulate all responses
      const req = TranslateStreamRequest.fromJson({
       text,
       toLang: toLang,
       fromLang: actualFromLang,
       fingerprint: actualFingerprint,
      });
-    
-    // Get the first (and likely only) response from the stream
-    const stream = this.client.translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
-    for await (const response of stream) {
-      return response;
-    }
-    
-    // If no response, throw an error
-    throw new Error('No translation response received');
-  }
+     
+     console.log(`[TranslationClient] Requesting translation for "${text}", fingerprint=${actualFingerprint}, toLang=${toLang}`);
+     console.log(`[TranslationClient] Request:`, req);
+     
+     // Get the response from the stream with timeout
+     let lastResponse: TranslateStreamResponse | null = null;
+     let received = 0;
+     
+     try {
+       const stream = this.client.translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
+       
+       // Create a timeout promise
+       const timeoutPromise = new Promise<never>((_, reject) => {
+         setTimeout(() => {
+           reject(new Error(`Translation timeout after ${timeoutMs}ms for "${text}"`));
+         }, timeoutMs);
+       });
+       
+       // Process the stream with timeout
+       const streamPromise = (async () => {
+         for await (const response of stream) {
+           received++;
+           console.log(`[TranslationClient] Received chunk ${received}:`, response);
+           lastResponse = response;
+           // If response is marked as finished, we can stop early
+           if (response.finished) {
+             break;
+           }
+         }
+         return lastResponse;
+       })();
+       
+       lastResponse = await Promise.race([streamPromise, timeoutPromise]);
+     } catch (error) {
+       console.error(`[TranslationClient] Translation failed for "${text}":`, error);
+       throw error;
+     }
+     
+     if (lastResponse) {
+       console.log(`[TranslationClient] Translation complete, final response:`, lastResponse);
+       return lastResponse;
+     }
+     
+     // If no response, throw an error
+     console.error(`[TranslationClient] No translation response received for "${text}"`);
+     throw new Error('No translation response received');
+   }
 
   /**
    * Stream translation batches for a semantic sense
