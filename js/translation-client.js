@@ -4410,7 +4410,7 @@ function mergeTemplate(template, vars) {
     return result;
 }
 // Version from package.json
-const version = '1.6.121';
+const version = '1.6.133';
 class TranslationPool {
     getPoolKey(fingerprint, toLang) {
         return `${fingerprint}:${toLang}`;
@@ -4784,8 +4784,8 @@ class TranslationPool {
         let updatedCount = 0;
         let addedCount = 0;
         const jsonRequest = {
-            senseId: this.senseId,
-            dstLang: toLang,
+            sense_id: this.senseId,
+            dst_lang: toLang,
         };
         if (fingerprint) {
             jsonRequest.fingerprint = fingerprint;
@@ -5064,6 +5064,13 @@ class TranslationPool {
         this.clearAll();
     }
     /**
+     * Alias for clearAll - clear entire cache
+     * Simple clear method for API compatibility
+     */
+    clear() {
+        this.clearAll();
+    }
+    /**
      * Set the current active fingerprint
      * Automatically loads the new fingerprint's translations for the current language
      * @param fingerprint New fingerprint to set
@@ -5192,12 +5199,13 @@ class TranslationClient {
         this.options = options;
         // If baseUrl is not provided, use the default production endpoint
         // The baseUrl should include the API path prefix for Connect RPC
-        // Expected format: https://api.hottol.com/laker
-        // cr = connect rpc - shorter and cleaner URL without dots
+        // New route structure: /api/v1/rpc/cr/<service>/<method>
+        // Expected format: https://api.hottol.com/laker (behind API gateway, context path /laker)
+        // All connect rpc requests start with /api/v1/rpc/cr/ for easier routing management
         const defaultBaseUrl = "https://api.hottol.com/laker";
         this.baseUrl = options.baseUrl
-            ? options.baseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/cr"
-            : defaultBaseUrl.replace(/\/$/, "") + "/api/v1/translate/rpc/cr";
+            ? options.baseUrl.replace(/\/$/, "") + "/api/v1/rpc/cr/translate"
+            : defaultBaseUrl.replace(/\/$/, "") + "/api/v1/rpc/cr/translate";
         this.token = options.token;
         // Use provided transport if available
         if (options.transport) {
@@ -5212,81 +5220,73 @@ class TranslationClient {
             }
             // Use JSON encoding because backend uses custom json codec (application/json)
             // This matches the backend registration: encoding.RegisterCodec(jsonCodec{}) with Name() = "json"
-            // To avoid dots in URL path (translation.TranslationService has dots that can cause Nginx 404)
-            // We wrap the original transport to intercept the request and modify the URL
-            // Final: {baseUrl}/TranslateStream instead of {baseUrl}/translation.TranslationService/TranslateStream
-            const baseUrl = this.baseUrl;
+            //
+            // THOROUGH FIX - SOURCE LEVEL:
+            // We never want `translation.TranslationService` in URL because it contains dots
+            // which causes Nginx 404 (Nginx treats dots as location matches.
+            //
+            // Our routing structure:
+            //   Final correct URL: .../api/v1/rpc/cr/translate/TranslateStream
+            //   - translate = service name, TranslateStream = method name
+            //   - No dots!
+            //
+            // Connect always builds: baseUrl + '/' + serviceName + '/' + methodName
+            //   serviceName = "translation.TranslationService" (fixed by protobuf)
+            //
+            // To get correct URL, we must TRUNCATE baseUrl to remove the service name part
+            // so that when Connect adds serviceName + methodName, we get exactly what we want:
+            //
+            // Example:
+            //   User provides: baseUrl = "https://api.hottol.com/laker/api/v1/rpc/cr/translate
+            //   We truncate to:  "https://api.hottol.com/laker/api/v1/rpc/cr
+            //   Connect adds:  + "/translation.TranslationService/TranslateStream"
+            //   Then interceptor removes "/translation.TranslationService"
+            //   Final: https://api.hottol.com/laker/api/v1/rpc/cr/translate/TranslateStream ✓
+            //
+            // But actually simpler: regardless of what user provided, we just ensure we remove
+            // any segment that contains a dot, because that's the service name with dots.
+            // This is 100% guaranteed to never have dots in final URL.
+            // Get original baseUrl, we only need to filter out segments that contain dots
+            // The this.baseUrl already ends with /translate which we want to keep as the service name (no dots)
+            // When Connect RPC adds serviceName/methodName → serviceName = translation.TranslationService (with dot)
+            // Then the interceptor will remove the serviceName segment containing the dot, resulting in:
+            // final URL = .../translate/methodName which is exactly what we need for routing
+            const urlObj = new URL(this.baseUrl);
+            const pathParts = urlObj.pathname.split('/').filter(p => p !== '');
+            // Remove ALL segments that contain dots - these are only from user-provided baseUrl if any
+            // Our this.baseUrl constructed here has no dots in segments already
+            const filteredParts = pathParts.filter(segment => !segment.includes('.'));
+            urlObj.pathname = '/' + filteredParts.join('/');
+            const baseUrl = urlObj.toString();
+            // Interceptor that guarantees no dots in final URL - remove any segment containing a dot
+            // This is defense in depth, double guarantee
+            const urlRewriteInterceptor = (next) => async (req) => {
+                const url = new URL(req.url);
+                const parts = url.pathname.split('/').filter(p => p !== '');
+                // Remove ALL segments that contain a dot - these are service names like translation.TranslationService
+                // This is 100% guaranteed to never have dots in final URL
+                const filtered = parts.filter(segment => !segment.includes('.'));
+                if (filtered.length !== parts.length) {
+                    url.pathname = '/' + filtered.join('/');
+                    req.url = url.toString();
+                    console.debug('[TranslationClient] Rewrote URL:', req.url);
+                }
+                return await next(req);
+            };
+            const interceptors = this.token
+                ? [urlRewriteInterceptor, (next) => async (req) => {
+                        req.header.set('api-key-token', this.token);
+                        return await next(req);
+                    }]
+                : [urlRewriteInterceptor];
             const originalTransport = createConnectTransport({
                 baseUrl,
                 useHttpGet: false,
                 useBinary: false,
-                interceptors: this.token ? [
-                    (next) => async (req) => {
-                        req.header.set('api-key-token', this.token);
-                        return await next(req);
-                    },
-                ] : undefined,
+                interceptors,
             });
-            // The createConnectTransport builds URL as: baseUrl + '/' + serviceName + '/' + methodName
-            // We need: baseUrl + '/' + methodName (no serviceName to avoid dots)
-            // To achieve this, we intercept by monkey-patching URL constructor
-            // @ts-ignore - we use any for compatibility
-            this.transport = {
-                unary: (service, method, ...args) => {
-                    // Monkey patch the URL constructor to remove the serviceName from the path
-                    const OriginalURL = URL;
-                    // @ts-ignore
-                    globalThis.URL = function (input) {
-                        // Input is full URL that connect built: baseUrl + '/' + service + '/' + method
-                        // We need to remove the service part: /translation.TranslationService/TranslateStream -> /TranslateStream
-                        const url = new OriginalURL(input);
-                        const parts = url.pathname.split('/');
-                        // Remove service name (it's the second last part)
-                        if (parts.length >= 2) {
-                            const secondLast = parts[parts.length - 2];
-                            if (secondLast.includes('.')) { // If it contains dots, it's definitely the service name
-                                parts.splice(parts.length - 2, 1);
-                                url.pathname = parts.join('/');
-                            }
-                        }
-                        return url;
-                    };
-                    try {
-                        // @ts-ignore
-                        return originalTransport.unary(service, method, ...args);
-                    }
-                    finally {
-                        // Restore original URL constructor
-                        // @ts-ignore
-                        globalThis.URL = OriginalURL;
-                    }
-                },
-                // @ts-ignore
-                stream: (service, method, ...args) => {
-                    const OriginalURL = URL;
-                    // @ts-ignore
-                    globalThis.URL = function (input) {
-                        const url = new OriginalURL(input);
-                        const parts = url.pathname.split('/');
-                        if (parts.length >= 2) {
-                            const secondLast = parts[parts.length - 2];
-                            if (secondLast.includes('.')) {
-                                parts.splice(parts.length - 2, 1);
-                                url.pathname = parts.join('/');
-                            }
-                        }
-                        return url;
-                    };
-                    try {
-                        // @ts-ignore
-                        return originalTransport.stream(service, method, ...args);
-                    }
-                    finally {
-                        // @ts-ignore
-                        globalThis.URL = OriginalURL;
-                    }
-                },
-            };
+            // @ts-ignore - transport interface matches
+            this.transport = originalTransport;
         }
         this.client = createClient(TranslationService, this.transport);
         this.senseId = options.senseId;
@@ -5345,14 +5345,14 @@ class TranslationClient {
         return response.translation[text] || text;
     }
     /**
-     * Translate text with full response details (direct API call, no caching)
-     * Auto-detects fingerprint if not provided
-     * @param text Original text to translate
-     * @param toLang Target language code
-     * @param fromLang Source language code (optional, defaults to client default)
-     * @param fingerprint Text fingerprint for domain-specific translations
-     * @returns Promise with complete translation response
-     */
+    * Translate text with full response details (direct API call, no caching)
+    * Auto-detects fingerprint if not provided
+    * @param text Original text to translate
+    * @param toLang Target language code
+    * @param fromLang Source language code (optional, defaults to client default)
+    * @param fingerprint Text fingerprint for domain-specific translations
+    * @returns Promise with complete translation response
+    */
     async translateWithDetails(text, toLang, fromLang, fingerprint, timeoutMs = 30000) {
         // Use defaults if not provided
         const actualFromLang = fromLang || this.defaultFromLang;
@@ -5361,8 +5361,8 @@ class TranslationClient {
         // Use TranslateStream for translation - accumulate all responses
         const req = TranslateStreamRequest.fromJson({
             text,
-            toLang: toLang,
-            fromLang: actualFromLang,
+            to_lang: toLang,
+            from_lang: actualFromLang,
             fingerprint: actualFingerprint,
         });
         console.log(`[TranslationClient] Requesting translation for "${text}", fingerprint=${actualFingerprint}, toLang=${toLang}`);
@@ -5416,8 +5416,8 @@ class TranslationClient {
      */
     translateStream(senseId, dstLang, fingerprint) {
         const req = TranslateStreamRequest.fromJson({
-            senseId,
-            dstLang,
+            sense_id: senseId,
+            dst_lang: dstLang,
         });
         if (fingerprint) {
             req.fingerprint = fingerprint;
@@ -5431,7 +5431,7 @@ class TranslationClient {
      */
     async getSenseTranslations(options) {
         const req = GetSenseTranslateRequest.fromJson({
-            senseId: options.senseId,
+            sense_id: options.senseId,
         });
         if (options.fingerprint !== undefined) {
             req.fingerprint = options.fingerprint;
@@ -5445,6 +5445,23 @@ class TranslationClient {
         // Note: srcLang, dstLang, dstLangs are not supported in GetSenseTranslateRequest
         // These fields are only available in TranslateStreamRequest
         return (await this.client.getSenseTranslate(req));
+    }
+    /**
+     * Alias for getSenseTranslations - compatibility alias
+     * Get paged list of translations for a semantic sense with optional filtering
+     * @param options Request options including filtering, pagination
+     * @returns Promise with filtered, paged translations
+     */
+    async getSenseTranslate(options) {
+        return this.getSenseTranslations(options);
+    }
+    /**
+     * Compatibility connect method - Connect RPC automatically manages connections
+     * This is provided for API compatibility only
+     */
+    connect() {
+        // Connect RPC manages connection automatically - no action needed
+        console.debug('[TranslationClient] connect() called - Connect RPC manages connections automatically');
     }
     /**
      * Create a translation pool for preloading and caching translations
@@ -5471,6 +5488,35 @@ class TranslationClient {
             senseId: this.senseId,
             defaultFromLang: this.defaultFromLang,
         };
+    }
+    /**
+     * Synchronous cache lookup (for immediate synchronous return in UI)
+     * SDK automatically handles all caching internally
+     * @param text Original text
+     * @param toLang Target language
+     * @param fromLang Source language (optional)
+     * @param fingerprint Fingerprint (optional)
+     * @returns Cache lookup result with found flag and translation
+     */
+    lookupSync(text, toLang, fromLang, fingerprint) {
+        fromLang || this.defaultFromLang;
+        const actualFingerprint = fingerprint ?? this.pool.getCurrentFingerprint() ?? 'common';
+        return this.pool.lookup(text, actualFingerprint, toLang);
+    }
+    /**
+     * Register callback for when translations are updated in the cache
+     * This is used to trigger UI re-renders after background translation completes
+     * @param callback Callback to invoke when translations are updated
+     */
+    onTranslationUpdated(callback) {
+        this.pool.setTranslationUpdatedCallback(callback);
+    }
+    /**
+     * Clear all cached translations for the current sense
+     * Clears both in-memory cache and persistent storage
+     */
+    clear() {
+        this.pool.clear();
     }
 }
 

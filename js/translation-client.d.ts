@@ -40,7 +40,7 @@ export declare function extractTemplate(text: string): {
  * @returns Merged text with variables substituted
  */
 export declare function mergeTemplate(template: string, vars: Record<string, string | number>): string;
-export declare const version = "1.6.121";
+export declare const version = "1.6.133";
 type CrossTabOptions = {
     enabled: boolean;
     channelName: string;
@@ -198,6 +198,11 @@ declare class TranslationPool {
      */
     clearCache(): void;
     /**
+     * Alias for clearAll - clear entire cache
+     * Simple clear method for API compatibility
+     */
+    clear(): void;
+    /**
      * Set the current active fingerprint
      * Automatically loads the new fingerprint's translations for the current language
      * @param fingerprint New fingerprint to set
@@ -274,14 +279,14 @@ declare class TranslationClient {
      */
     translate(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<string>;
     /**
-     * Translate text with full response details (direct API call, no caching)
-     * Auto-detects fingerprint if not provided
-     * @param text Original text to translate
-     * @param toLang Target language code
-     * @param fromLang Source language code (optional, defaults to client default)
-     * @param fingerprint Text fingerprint for domain-specific translations
-     * @returns Promise with complete translation response
-     */
+    * Translate text with full response details (direct API call, no caching)
+    * Auto-detects fingerprint if not provided
+    * @param text Original text to translate
+    * @param toLang Target language code
+    * @param fromLang Source language code (optional, defaults to client default)
+    * @param fingerprint Text fingerprint for domain-specific translations
+    * @returns Promise with complete translation response
+    */
     translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string, timeoutMs?: number): Promise<TranslateStreamResponse>;
     /**
      * Stream translation batches for a semantic sense
@@ -299,6 +304,18 @@ declare class TranslationClient {
      * @returns Promise with filtered, paged translations
      */
     getSenseTranslations(options: GetSenseTranslateRequestOptions): Promise<GetSenseTranslateResponse>;
+    /**
+     * Alias for getSenseTranslations - compatibility alias
+     * Get paged list of translations for a semantic sense with optional filtering
+     * @param options Request options including filtering, pagination
+     * @returns Promise with filtered, paged translations
+     */
+    getSenseTranslate(options: GetSenseTranslateRequestOptions): Promise<GetSenseTranslateResponse>;
+    /**
+     * Compatibility connect method - Connect RPC automatically manages connections
+     * This is provided for API compatibility only
+     */
+    connect(): void;
     /**
      * Create a translation pool for preloading and caching translations
      * @param senseId Semantic sense ID to create pool for
@@ -319,6 +336,30 @@ declare class TranslationClient {
         senseId: string;
         defaultFromLang: string;
     };
+    /**
+     * Synchronous cache lookup (for immediate synchronous return in UI)
+     * SDK automatically handles all caching internally
+     * @param text Original text
+     * @param toLang Target language
+     * @param fromLang Source language (optional)
+     * @param fingerprint Fingerprint (optional)
+     * @returns Cache lookup result with found flag and translation
+     */
+    lookupSync(text: string, toLang: string, fromLang?: string, fingerprint?: string): {
+        found: boolean;
+        translation?: string;
+    };
+    /**
+     * Register callback for when translations are updated in the cache
+     * This is used to trigger UI re-renders after background translation completes
+     * @param callback Callback to invoke when translations are updated
+     */
+    onTranslationUpdated(callback: () => void): void;
+    /**
+     * Clear all cached translations for the current sense
+     * Clears both in-memory cache and persistent storage
+     */
+    clear(): void;
 }
 export default TranslationClient;
 export { TranslationClient, TranslationPool };
