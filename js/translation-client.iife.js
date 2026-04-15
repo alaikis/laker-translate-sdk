@@ -6475,12 +6475,89 @@ var LakerTranslation = (function (exports) {
                 ? options.baseUrl.replace(/\/$/, "") + "/api/v1/rpc/cr/translate"
                 : defaultBaseUrl.replace(/\/$/, "") + "/api/v1/rpc/cr/translate";
             this.token = options.token;
-            // Use provided transport if available
+            // Interceptor that guarantees no dots in final URL - remove any segment containing a dot
+            // This is defense in depth, double guarantee
+            const urlRewriteInterceptor = (next) => async (req) => {
+                const url = new URL(req.url);
+                const parts = url.pathname.split('/').filter(p => p !== '');
+                // Remove ALL segments that contain a dot - these are service names like translation.TranslationService
+                // This is 100% guaranteed to never have dots in final URL
+                const filtered = parts.filter(segment => !segment.includes('.'));
+                if (filtered.length !== parts.length) {
+                    url.pathname = '/' + filtered.join('/');
+                    req.url = url.toString();
+                    console.debug('[TranslationClient] Rewrote URL:', req.url);
+                }
+                return await next(req);
+            };
+            // Get original baseUrl, we need to ensure no segments contain dots
+            // We actually want the baseUrl to stop before adding service/method
+            // After filtering, the interceptor will do the final cleanup
+            const urlObj = new URL(this.baseUrl);
+            const pathParts = urlObj.pathname.split('/').filter(p => p !== '');
+            // Remove ALL segments that contain dots - these are service names with dots from misconfiguration
+            const filteredParts = pathParts.filter(segment => !segment.includes('.'));
+            urlObj.pathname = '/' + filteredParts.join('/');
+            const baseUrl = urlObj.toString();
+            // Update this.baseUrl to the filtered version for debugging
+            this.baseUrl = baseUrl;
+            // Combine interceptors - URL rewrite must come first, then auth
+            const baseInterceptors = [urlRewriteInterceptor];
+            if (this.token) {
+                baseInterceptors.push((next) => async (req) => {
+                    req.header.set('api-key-token', this.token);
+                    return await next(req);
+                });
+            }
+            // When user provides a custom transport, we still need to add our base interceptors
+            // This ensures that:
+            // 1. URL rewrite is always applied (removing dots from segments)
+            // 2. Authentication token is always added if provided
+            // We combine our base interceptors with any existing interceptors from the user's transport creation
+            // Note: For createConnectTransport generated transports, interceptors are stored on the transport object
+            // so we can extract them and recreate with combined interceptors
+            // User can also provide createConnectTransport in options for Node.js ESM use case
+            const createConnectTransportFn = options.createConnectTransport || createConnectTransport;
+            let combinedInterceptors = [...baseInterceptors];
             if (options.transport) {
-                this.transport = options.transport;
+                // @ts-ignore - types match at runtime, accessing original options from transport creation
+                // createConnectTransport stores baseUrl and interceptors on the instance
+                if (options.transport._interceptors) {
+                    // @ts-ignore
+                    combinedInterceptors = [...baseInterceptors, ...options.transport._interceptors];
+                }
+                // When user provides transport created with createConnectTransport, we extract
+                // the baseUrl and recreate with our combined interceptors. This guarantees
+                // our base interceptors (URL rewrite and auth) are always applied
+                // @ts-ignore
+                const existingBaseUrl = options.transport._baseUrl || baseUrl;
+                if (!createConnectTransportFn) {
+                    // If createConnectTransport isn't available (pure ESM Node.js loading dynamic),
+                    // we can't recreate - user must have already added our required interceptors themselves
+                    this.transport = options.transport;
+                    console.debug('[TranslationClient] Using user-provided transport as-is (createConnectTransport unavailable)');
+                }
+                else {
+                    // Recreate the transport with our combined interceptors
+                    // This guarantees our base interceptors are always applied
+                    const newTransport = createConnectTransportFn({
+                        baseUrl: existingBaseUrl,
+                        useHttpGet: false,
+                        useBinary: false,
+                        interceptors: combinedInterceptors,
+                    });
+                    // Store baseUrl and interceptors on our new transport for future reuse
+                    // @ts-ignore
+                    newTransport._baseUrl = existingBaseUrl;
+                    // @ts-ignore
+                    newTransport._interceptors = combinedInterceptors;
+                    // @ts-ignore - transport interface matches
+                    this.transport = newTransport;
+                    console.debug('[TranslationClient] Recreated user-provided transport with base interceptors added');
+                }
             }
             else {
-                // Create Connect transport with api-key-token header if token provided
+                // Create Connect transport with our base interceptors that guarantee URL rewrite and auth
                 if (!createConnectTransport) {
                     throw new Error('createConnectTransport is not initialized. If you are using pure ESM in Node.js, ' +
                         'you need to manually create and provide the transport. ' +
@@ -6488,71 +6565,17 @@ var LakerTranslation = (function (exports) {
                 }
                 // Use JSON encoding because backend uses custom json codec (application/json)
                 // This matches the backend registration: encoding.RegisterCodec(jsonCodec{}) with Name() = "json"
-                //
-                // THOROUGH FIX - SOURCE LEVEL:
-                // We never want `translation.TranslationService` in URL because it contains dots
-                // which causes Nginx 404 (Nginx treats dots as location matches.
-                //
-                // Our routing structure:
-                //   Final correct URL: .../api/v1/rpc/cr/translate/TranslateStream
-                //   - translate = service name, TranslateStream = method name
-                //   - No dots!
-                //
-                // Connect always builds: baseUrl + '/' + serviceName + '/' + methodName
-                //   serviceName = "translation.TranslationService" (fixed by protobuf)
-                //
-                // To get correct URL, we must TRUNCATE baseUrl to remove the service name part
-                // so that when Connect adds serviceName + methodName, we get exactly what we want:
-                //
-                // Example:
-                //   User provides: baseUrl = "https://api.hottol.com/laker/api/v1/rpc/cr/translate
-                //   We truncate to:  "https://api.hottol.com/laker/api/v1/rpc/cr
-                //   Connect adds:  + "/translation.TranslationService/TranslateStream"
-                //   Then interceptor removes "/translation.TranslationService"
-                //   Final: https://api.hottol.com/laker/api/v1/rpc/cr/translate/TranslateStream ✓
-                //
-                // But actually simpler: regardless of what user provided, we just ensure we remove
-                // any segment that contains a dot, because that's the service name with dots.
-                // This is 100% guaranteed to never have dots in final URL.
-                // Get original baseUrl, we only need to filter out segments that contain dots
-                // The this.baseUrl already ends with /translate which we want to keep as the service name (no dots)
-                // When Connect RPC adds serviceName/methodName → serviceName = translation.TranslationService (with dot)
-                // Then the interceptor will remove the serviceName segment containing the dot, resulting in:
-                // final URL = .../translate/methodName which is exactly what we need for routing
-                const urlObj = new URL(this.baseUrl);
-                const pathParts = urlObj.pathname.split('/').filter(p => p !== '');
-                // Remove ALL segments that contain dots - these are only from user-provided baseUrl if any
-                // Our this.baseUrl constructed here has no dots in segments already
-                const filteredParts = pathParts.filter(segment => !segment.includes('.'));
-                urlObj.pathname = '/' + filteredParts.join('/');
-                const baseUrl = urlObj.toString();
-                // Interceptor that guarantees no dots in final URL - remove any segment containing a dot
-                // This is defense in depth, double guarantee
-                const urlRewriteInterceptor = (next) => async (req) => {
-                    const url = new URL(req.url);
-                    const parts = url.pathname.split('/').filter(p => p !== '');
-                    // Remove ALL segments that contain a dot - these are service names like translation.TranslationService
-                    // This is 100% guaranteed to never have dots in final URL
-                    const filtered = parts.filter(segment => !segment.includes('.'));
-                    if (filtered.length !== parts.length) {
-                        url.pathname = '/' + filtered.join('/');
-                        req.url = url.toString();
-                        console.debug('[TranslationClient] Rewrote URL:', req.url);
-                    }
-                    return await next(req);
-                };
-                const interceptors = this.token
-                    ? [urlRewriteInterceptor, (next) => async (req) => {
-                            req.header.set('api-key-token', this.token);
-                            return await next(req);
-                        }]
-                    : [urlRewriteInterceptor];
-                const originalTransport = createConnectTransport({
+                const originalTransport = createConnectTransportFn({
                     baseUrl,
                     useHttpGet: false,
                     useBinary: false,
-                    interceptors,
+                    interceptors: combinedInterceptors,
                 });
+                // Store baseUrl and interceptors on the transport instance for potential reuse
+                // @ts-ignore
+                originalTransport._baseUrl = baseUrl;
+                // @ts-ignore
+                originalTransport._interceptors = combinedInterceptors;
                 // @ts-ignore - transport interface matches
                 this.transport = originalTransport;
             }

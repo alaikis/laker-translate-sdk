@@ -257,6 +257,7 @@ export type TranslationClientOptions = {
     backgroundUpdate?: Partial<BackgroundUpdateOptions>;
     persistentStorage?: unknown;
     transport?: Transport;
+    createConnectTransport?: (options: any) => Transport;
 };
 declare class TranslationClient {
     baseUrl: string;
