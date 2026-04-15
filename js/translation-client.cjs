@@ -1,4 +1,8 @@
-import { createConnectTransport as createConnectTransport$1 } from '@connectrpc/connect-web';
+'use strict';
+
+Object.defineProperty(exports, '__esModule', { value: true });
+
+var connectWeb = require('@connectrpc/connect-web');
 
 // Copyright 2021-2024 Buf Technologies, Inc.
 //
@@ -4335,7 +4339,7 @@ if (typeof window !== 'undefined' && window.__LAKER_BROWSER_TRANSPORT) {
 else if (typeof fetch === 'function' && typeof window !== 'undefined') {
     // Browser environment (Vite/Webpack ESM or CJS build) - use statically imported version
     // User's project already has @connectrpc/connect-web as dependency so it's available
-    createConnectTransport = createConnectTransport$1;
+    createConnectTransport = connectWeb.createConnectTransport;
 }
 else {
     // Node.js environment - use connect-node (based on Node.js HTTP/2)
@@ -5522,5 +5526,10 @@ class TranslationClient {
     }
 }
 
-export { TranslationClient, TranslationPool, TranslationClient as default, extractTemplate, mergeTemplate, version };
-//# sourceMappingURL=translation-client.js.map
+exports.TranslationClient = TranslationClient;
+exports.TranslationPool = TranslationPool;
+exports.default = TranslationClient;
+exports.extractTemplate = extractTemplate;
+exports.mergeTemplate = mergeTemplate;
+exports.version = version;
+//# sourceMappingURL=translation-client.cjs.map

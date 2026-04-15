@@ -7,11 +7,9 @@
  *
  * This client uses Connect RPC for native HTTP streaming over HTTP/2
  * Supports true multiplexing on a single connection
- * Supports both web browsers and Node.js
  */
-import { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord } from './gen/translation_pb';
-import type { Transport } from '@connectrpc/connect';
-export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord, };
+import { createConnectTransport } from '@connectrpc/connect-web';
+export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord, } from './gen/proto/translation_pb';
 export type GetSenseTranslateRequestOptions = {
     senseId: string;
     fingerprint?: string;
@@ -21,9 +19,9 @@ export type GetSenseTranslateRequestOptions = {
     dstLang?: string;
     dstLangs?: string[];
 };
+import type { GetSenseTranslateResponse, TranslateStreamResponse } from './gen/proto/translation_pb';
 /**
  * Automatic template extraction from text containing numeric variables
- * Also handles existing {varName} style templates
  * @param text Original text that may contain numeric variables
  * @returns Template extraction result
  */
@@ -33,14 +31,6 @@ export declare function extractTemplate(text: string): {
     dstTemplate: string;
     variables: string[];
 };
-/**
- * Merge template with variables
- * @param template Template with {variable} placeholders
- * @param vars Object mapping variable names to values
- * @returns Merged text with variables substituted
- */
-export declare function mergeTemplate(template: string, vars: Record<string, string | number>): string;
-export declare const version = "1.6.134";
 type CrossTabOptions = {
     enabled: boolean;
     channelName: string;
@@ -198,11 +188,6 @@ declare class TranslationPool {
      */
     clearCache(): void;
     /**
-     * Alias for clearAll - clear entire cache
-     * Simple clear method for API compatibility
-     */
-    clear(): void;
-    /**
      * Set the current active fingerprint
      * Automatically loads the new fingerprint's translations for the current language
      * @param fingerprint New fingerprint to set
@@ -210,23 +195,10 @@ declare class TranslationPool {
      */
     setCurrentFingerprint(fingerprint: string | null, toLang?: string): Promise<void>;
     /**
-     * Set the current target language
-     * Automatically initializes the translation pool for the new language with common and current fingerprint
-     * Uses existing initialize() method that already handles both common and fingerprint loading
-     * @param toLang New target language
-     * @param fingerprint Optional fingerprint (uses current fingerprint if not provided)
-     */
-    setCurrentLanguage(toLang: string, fingerprint?: string | null): Promise<void>;
-    /**
      * Get current active fingerprint
      * @returns Current fingerprint or null
      */
     getCurrentFingerprint(): string | null;
-    /**
-     * Get current target language
-     * @returns Current target language or null
-     */
-    getCurrentLanguage(): string | null;
     /**
      * Start background update checker that periodically checks for stale translations
      * Only runs if background update is enabled
@@ -256,13 +228,12 @@ export type TranslationClientOptions = {
     crossTab?: Partial<CrossTabOptions>;
     backgroundUpdate?: Partial<BackgroundUpdateOptions>;
     persistentStorage?: unknown;
-    transport?: Transport;
 };
 declare class TranslationClient {
     baseUrl: string;
     token?: string;
     client: any;
-    transport: Transport;
+    transport: ReturnType<typeof createConnectTransport>;
     private pool;
     private senseId;
     private defaultFromLang;
@@ -270,7 +241,6 @@ declare class TranslationClient {
     constructor(options: TranslationClientOptions);
     /**
      * Simple one-shot translation - automatically handles caching, initialization, and queuing
-     * Auto-detects fingerprint and language changes, automatically loads new translation pool
      * @param text Original text to translate
      * @param toLang Target language code
      * @param fromLang Source language code (optional, defaults to client default)
@@ -279,15 +249,14 @@ declare class TranslationClient {
      */
     translate(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<string>;
     /**
-    * Translate text with full response details (direct API call, no caching)
-    * Auto-detects fingerprint if not provided
-    * @param text Original text to translate
-    * @param toLang Target language code
-    * @param fromLang Source language code (optional, defaults to client default)
-    * @param fingerprint Text fingerprint for domain-specific translations
-    * @returns Promise with complete translation response
-    */
-    translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string, timeoutMs?: number): Promise<TranslateStreamResponse>;
+     * Translate text with full response details (direct API call, no caching)
+     * @param text Original text to translate
+     * @param toLang Target language code
+     * @param fromLang Source language code (optional, defaults to client default)
+     * @param fingerprint Text fingerprint for domain-specific translations
+     * @returns Promise with complete translation response
+     */
+    translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string): Promise<TranslateStreamResponse>;
     /**
      * Stream translation batches for a semantic sense
      * Uses native Connect RPC streaming with true multiplexing
@@ -299,23 +268,11 @@ declare class TranslationClient {
      */
     translateStream(senseId: string, dstLang: string, fingerprint?: string): AsyncIterable<TranslateStreamResponse>;
     /**
-     Get paged list of translations for a semantic sense with optional filtering
-     * @param options Request options including filtering, pagination
-     * @returns Promise with filtered, paged translations
-     */
-    getSenseTranslations(options: GetSenseTranslateRequestOptions): Promise<GetSenseTranslateResponse>;
-    /**
-     * Alias for getSenseTranslations - compatibility alias
      * Get paged list of translations for a semantic sense with optional filtering
      * @param options Request options including filtering, pagination
      * @returns Promise with filtered, paged translations
      */
-    getSenseTranslate(options: GetSenseTranslateRequestOptions): Promise<GetSenseTranslateResponse>;
-    /**
-     * Compatibility connect method - Connect RPC automatically manages connections
-     * This is provided for API compatibility only
-     */
-    connect(): void;
+    getSenseTranslations(options: GetSenseTranslateRequestOptions): Promise<GetSenseTranslateResponse>;
     /**
      * Create a translation pool for preloading and caching translations
      * @param senseId Semantic sense ID to create pool for
@@ -336,30 +293,6 @@ declare class TranslationClient {
         senseId: string;
         defaultFromLang: string;
     };
-    /**
-     * Synchronous cache lookup (for immediate synchronous return in UI)
-     * SDK automatically handles all caching internally
-     * @param text Original text
-     * @param toLang Target language
-     * @param fromLang Source language (optional)
-     * @param fingerprint Fingerprint (optional)
-     * @returns Cache lookup result with found flag and translation
-     */
-    lookupSync(text: string, toLang: string, fromLang?: string, fingerprint?: string): {
-        found: boolean;
-        translation?: string;
-    };
-    /**
-     * Register callback for when translations are updated in the cache
-     * This is used to trigger UI re-renders after background translation completes
-     * @param callback Callback to invoke when translations are updated
-     */
-    onTranslationUpdated(callback: () => void): void;
-    /**
-     * Clear all cached translations for the current sense
-     * Clears both in-memory cache and persistent storage
-     */
-    clear(): void;
 }
 export default TranslationClient;
 export { TranslationClient, TranslationPool };
