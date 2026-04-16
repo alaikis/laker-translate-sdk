@@ -5615,6 +5615,12 @@ var LakerTranslation = (function (exports) {
             });
         }
     }
+    let cachedTransports = new Map();
+    function getTransportCacheKey(key) {
+        // Create a stable cache key based on baseUrl, token presence and interceptor count
+        // Interceptors are not compared by value - they are expected to be stable
+        return `${key.baseUrl}|${!!key.token}|${key.interceptors.length}`;
+    }
     const defaultCrossTabOptions = {
         enabled: false,
         channelName: 'laker-translation-cache',
@@ -6599,22 +6605,37 @@ var LakerTranslation = (function (exports) {
                     console.debug('[TranslationClient] Using user-provided transport as-is (createConnectTransport unavailable)');
                 }
                 else {
-                    // Recreate the transport with our combined interceptors
-                    // This guarantees our base interceptors are always applied
-                    const newTransport = createConnectTransportFn({
+                    // Check cache for existing transport with identical configuration
+                    const cacheKey = getTransportCacheKey({
                         baseUrl: existingBaseUrl,
-                        useHttpGet: false,
-                        useBinary: false,
                         interceptors: combinedInterceptors,
+                        token: this.token
                     });
-                    // Store baseUrl and interceptors on our new transport for future reuse
-                    // @ts-ignore
-                    newTransport._baseUrl = existingBaseUrl;
-                    // @ts-ignore
-                    newTransport._interceptors = combinedInterceptors;
-                    // @ts-ignore - transport interface matches
-                    this.transport = newTransport;
-                    console.debug('[TranslationClient] Recreated user-provided transport with base interceptors added');
+                    if (cachedTransports.has(cacheKey)) {
+                        // Reuse existing transport - this maximizes HTTP connection reuse
+                        this.transport = cachedTransports.get(cacheKey);
+                        console.debug('[TranslationClient] Reusing cached transport for', existingBaseUrl);
+                    }
+                    else {
+                        // Recreate the transport with our combined interceptors
+                        // This guarantees our base interceptors are always applied
+                        const newTransport = createConnectTransportFn({
+                            baseUrl: existingBaseUrl,
+                            useHttpGet: false,
+                            useBinary: false,
+                            interceptors: combinedInterceptors,
+                        });
+                        // Store baseUrl and interceptors on our new transport for future reuse
+                        // @ts-ignore
+                        newTransport._baseUrl = existingBaseUrl;
+                        // @ts-ignore
+                        newTransport._interceptors = combinedInterceptors;
+                        // @ts-ignore - transport interface matches
+                        this.transport = newTransport;
+                        // Cache for future reuse
+                        cachedTransports.set(cacheKey, this.transport);
+                        console.debug('[TranslationClient] Recreated user-provided transport with base interceptors added');
+                    }
                 }
             }
             else {
@@ -6624,21 +6645,37 @@ var LakerTranslation = (function (exports) {
                         'you need to manually create and provide the transport. ' +
                         'See documentation for details.');
                 }
-                // Use JSON encoding because backend uses custom json codec (application/json)
-                // This matches the backend registration: encoding.RegisterCodec(jsonCodec{}) with Name() = "json"
-                const originalTransport = createConnectTransportFn({
+                // Check cache for existing transport with identical configuration
+                const cacheKey = getTransportCacheKey({
                     baseUrl,
-                    useHttpGet: false,
-                    useBinary: false,
                     interceptors: combinedInterceptors,
+                    token: this.token
                 });
-                // Store baseUrl and interceptors on the transport instance for potential reuse
-                // @ts-ignore
-                originalTransport._baseUrl = baseUrl;
-                // @ts-ignore
-                originalTransport._interceptors = combinedInterceptors;
-                // @ts-ignore - transport interface matches
-                this.transport = originalTransport;
+                if (cachedTransports.has(cacheKey)) {
+                    // Reuse existing transport - this maximizes HTTP connection reuse
+                    this.transport = cachedTransports.get(cacheKey);
+                    console.debug('[TranslationClient] Reusing cached transport for', baseUrl);
+                }
+                else {
+                    // Use JSON encoding because backend uses custom json codec (application/json)
+                    // This matches the backend registration: encoding.RegisterCodec(jsonCodec{}) with Name() = "json"
+                    const originalTransport = createConnectTransportFn({
+                        baseUrl,
+                        useHttpGet: false,
+                        useBinary: false,
+                        interceptors: combinedInterceptors,
+                    });
+                    // Store baseUrl and interceptors on the transport instance for potential reuse
+                    // @ts-ignore
+                    originalTransport._baseUrl = baseUrl;
+                    // @ts-ignore
+                    originalTransport._interceptors = combinedInterceptors;
+                    // @ts-ignore - transport interface matches
+                    this.transport = originalTransport;
+                    // Cache for future reuse
+                    cachedTransports.set(cacheKey, this.transport);
+                    console.debug('[TranslationClient] Created new transport and cached for reuse');
+                }
             }
             this.client = createClient(TranslationService, this.transport);
             this.senseId = options.senseId;

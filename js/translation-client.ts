@@ -50,6 +50,21 @@ if (typeof window !== 'undefined' && (window as any).__LAKER_BROWSER_TRANSPORT) 
   }
 }
 
+// Cache for created transports - reuse transport for identical configurations
+// This maximizes HTTP connection reuse because all requests share the same transport
+type CachedTransportKey = {
+  baseUrl: string;
+  interceptors: Interceptor[];
+  token?: string;
+};
+let cachedTransports: Map<string, Transport> = new Map();
+
+function getTransportCacheKey(key: CachedTransportKey): string {
+  // Create a stable cache key based on baseUrl, token presence and interceptor count
+  // Interceptors are not compared by value - they are expected to be stable
+  return `${key.baseUrl}|${!!key.token}|${key.interceptors.length}`;
+}
+
 // Re-export all types from generated code
 export type {
   GetSenseTranslateRequest,
@@ -1258,48 +1273,80 @@ class TranslationClient {
          this.transport = options.transport;
          console.debug('[TranslationClient] Using user-provided transport as-is (createConnectTransport unavailable)');
        } else {
-         // Recreate the transport with our combined interceptors
-         // This guarantees our base interceptors are always applied
-         const newTransport = createConnectTransportFn({
+         // Check cache for existing transport with identical configuration
+         const cacheKey = getTransportCacheKey({
            baseUrl: existingBaseUrl,
+           interceptors: combinedInterceptors,
+           token: this.token
+         });
+         
+         if (cachedTransports.has(cacheKey)) {
+           // Reuse existing transport - this maximizes HTTP connection reuse
+           this.transport = cachedTransports.get(cacheKey)!;
+           console.debug('[TranslationClient] Reusing cached transport for', existingBaseUrl);
+         } else {
+           // Recreate the transport with our combined interceptors
+           // This guarantees our base interceptors are always applied
+           const newTransport = createConnectTransportFn({
+             baseUrl: existingBaseUrl,
+             useHttpGet: false,
+             useBinary: false,
+             interceptors: combinedInterceptors,
+           });
+           // Store baseUrl and interceptors on our new transport for future reuse
+           // @ts-ignore
+           newTransport._baseUrl = existingBaseUrl;
+           // @ts-ignore
+           newTransport._interceptors = combinedInterceptors;
+           // @ts-ignore - transport interface matches
+           this.transport = newTransport as Transport;
+           // Cache for future reuse
+           cachedTransports.set(cacheKey, this.transport);
+           console.debug('[TranslationClient] Recreated user-provided transport with base interceptors added');
+         }
+       }
+     } else {
+       // Create Connect transport with our base interceptors that guarantee URL rewrite and auth
+       if (!createConnectTransport) {
+         throw new Error(
+           'createConnectTransport is not initialized. If you are using pure ESM in Node.js, ' +
+           'you need to manually create and provide the transport. ' +
+           'See documentation for details.'
+         );
+       }
+       
+       // Check cache for existing transport with identical configuration
+       const cacheKey = getTransportCacheKey({
+         baseUrl,
+         interceptors: combinedInterceptors,
+         token: this.token
+       });
+       
+       if (cachedTransports.has(cacheKey)) {
+         // Reuse existing transport - this maximizes HTTP connection reuse
+         this.transport = cachedTransports.get(cacheKey)!;
+         console.debug('[TranslationClient] Reusing cached transport for', baseUrl);
+       } else {
+         // Use JSON encoding because backend uses custom json codec (application/json)
+         // This matches the backend registration: encoding.RegisterCodec(jsonCodec{}) with Name() = "json"
+         const originalTransport = createConnectTransportFn({
+           baseUrl,
            useHttpGet: false,
            useBinary: false,
            interceptors: combinedInterceptors,
          });
-         // Store baseUrl and interceptors on our new transport for future reuse
+         // Store baseUrl and interceptors on the transport instance for potential reuse
          // @ts-ignore
-         newTransport._baseUrl = existingBaseUrl;
+         originalTransport._baseUrl = baseUrl;
          // @ts-ignore
-         newTransport._interceptors = combinedInterceptors;
+         originalTransport._interceptors = combinedInterceptors;
          // @ts-ignore - transport interface matches
-         this.transport = newTransport as Transport;
-         console.debug('[TranslationClient] Recreated user-provided transport with base interceptors added');
+         this.transport = originalTransport as Transport;
+         // Cache for future reuse
+         cachedTransports.set(cacheKey, this.transport);
+         console.debug('[TranslationClient] Created new transport and cached for reuse');
        }
-    } else {
-      // Create Connect transport with our base interceptors that guarantee URL rewrite and auth
-      if (!createConnectTransport) {
-        throw new Error(
-          'createConnectTransport is not initialized. If you are using pure ESM in Node.js, ' +
-          'you need to manually create and provide the transport. ' +
-          'See documentation for details.'
-        );
-      }
-       // Use JSON encoding because backend uses custom json codec (application/json)
-       // This matches the backend registration: encoding.RegisterCodec(jsonCodec{}) with Name() = "json"
-       const originalTransport = createConnectTransportFn({
-         baseUrl,
-         useHttpGet: false,
-         useBinary: false,
-         interceptors: combinedInterceptors,
-       });
-       // Store baseUrl and interceptors on the transport instance for potential reuse
-       // @ts-ignore
-       originalTransport._baseUrl = baseUrl;
-       // @ts-ignore
-       originalTransport._interceptors = combinedInterceptors;
-       // @ts-ignore - transport interface matches
-       this.transport = originalTransport as Transport;
-    }
+     }
     
     this.client = createClient(TranslationService as any, this.transport);
     
