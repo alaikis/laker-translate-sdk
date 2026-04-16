@@ -146,7 +146,7 @@ export function mergeTemplate(template: string, vars: Record<string, string | nu
 }
 
 // Version from package.json
-export const version = '1.6.134';
+export const version = '1.6.137';
 
 type CrossTabOptions = {
   enabled: boolean;
@@ -337,9 +337,8 @@ class TranslationPool {
         if (colonIndex > 0) {
           const fingerprint = afterPrefix.substring(0, colonIndex);
           const toLang = afterPrefix.substring(colonIndex + 1);
-          if (fingerprint === 'common') {
-            this.loadLanguageFromStorage(fingerprint, toLang);
-          }
+          // Load all cached fingerprints from storage, not just common
+          this.loadLanguageFromStorage(fingerprint, toLang);
         }
       }
     }
@@ -507,13 +506,13 @@ class TranslationPool {
       req: PendingRequest,
       attempt = 0
     ): Promise<{ text: string; translation: string; success: boolean }> => {
-      try {
-         const lookup = this.lookup(req.text, req.fingerprint);
+      try {         // Always check in-memory cache first - if found, use immediately
+         const lookup = this.lookup(req.text, req.fingerprint, req.toLang);
          if (lookup.found && lookup.translation) {
            // Already in cache, use cached value directly - no need to request
            return { text: req.text, translation: lookup.translation, success: true };
          } else {
-           // Not in cache, need to request from server
+           // Not in in-memory cache, request from server
            const response = await this.client.translateWithDetails(
              req.text,
              req.toLang,
@@ -527,10 +526,10 @@ class TranslationPool {
           `[TranslationPool] Request failed (attempt ${attempt + 1}/${maxRetries}):`,
           (error as Error).message
         );
-        if (attempt < maxRetries - 1) {
-          await new Promise(resolve => setTimeout(resolve, retryDelayMs * (attempt + 1));
-          return processWithRetry(req, attempt + 1);
-        }
+         if (attempt < maxRetries - 1) {
+           await new Promise(resolve => setTimeout(resolve, retryDelayMs * (attempt + 1)));
+           return processWithRetry(req, attempt + 1);
+         }
         console.error(`[TranslationPool] All retries failed for: "${req.text}", using original text`);
         return { text: req.text, translation: req.text, success: false };
       }
@@ -628,16 +627,43 @@ class TranslationPool {
     this.currentToLang = toLang;
     try {
       console.log(`[TranslationPool] Starting pool initialization... (toLang: ${toLang})`);
-      console.log(`[TranslationPool] Force reloading all translations from server for cache synchronization`);
-      // Always load from server regardless of local cache to ensure cache synchronization
-      await this.loadFingerprintTranslations('common', undefined, toLang);
-      console.log(`[TranslationPool] Common translations loaded for ${toLang}`);
+      
+      // First try to load from localStorage (browser cache)
+      this.loadLanguageFromStorage('common', toLang);
+      const commonPoolKey = this.getPoolKey('common', toLang);
+      const commonPool = this.pools.get(commonPoolKey);
+      let hasLocalCache = commonPool && commonPool.size > 0;
+      
+      // If we have a current fingerprint, also load it from localStorage first
       if (this.currentFingerprint) {
-        await this.loadFingerprintTranslations(this.currentFingerprint, this.currentFingerprint, toLang);
-        console.log(`[TranslationPool] ${this.currentFingerprint} translations loaded for ${toLang}`);
+        this.loadLanguageFromStorage(this.currentFingerprint, toLang);
+        const fpPoolKey = this.getPoolKey(this.currentFingerprint, toLang);
+        const fpPool = this.pools.get(fpPoolKey);
+        if (fpPool && fpPool.size > 0) {
+          hasLocalCache = true;
+        }
       }
+      
+      if (hasLocalCache) {
+        console.log(`[TranslationPool] Using existing translations from localStorage cache (no server fetch needed)`);
+        this.loadedCombinations.add(commonPoolKey);
+        if (this.currentFingerprint) {
+          const fpPoolKey = this.getPoolKey(this.currentFingerprint, toLang);
+          this.loadedCombinations.add(fpPoolKey);
+        }
+      } else {
+        console.log(`[TranslationPool] No local cache found, loading all translations from server for cache synchronization`);
+        // No local cache available, need to load from server
+        await this.loadFingerprintTranslations('common', undefined, toLang);
+        console.log(`[TranslationPool] Common translations loaded for ${toLang}`);
+        if (this.currentFingerprint) {
+          await this.loadFingerprintTranslations(this.currentFingerprint, this.currentFingerprint, toLang);
+          console.log(`[TranslationPool] ${this.currentFingerprint} translations loaded for ${toLang}`);
+        }
+      }
+      
       this.broadcastUpdate();
-      console.log(`[TranslationPool] Pool initialization completed for ${toLang}`);
+      console.log(`[TranslationPool] Pool initialization completed for ${toLang} (local cache: ${hasLocalCache ? 'used' : 'not found, fetched from server'})`);
       if (this.onPoolInitialized) {
         this.onPoolInitialized();
       }
@@ -987,12 +1013,23 @@ class TranslationPool {
      this.currentLanguageVersion++;
      console.log(`[TranslationPool] Changed current fingerprint from ${oldFingerprint} to: ${fingerprint}`);
      
-     // If we have a target language and the fingerprint changed, always load from server
-     // to ensure cache synchronization
+     // If we have a target language and the fingerprint changed, check local cache first
      if (targetLang && fingerprint && fingerprint !== oldFingerprint) {
-       console.log(`[TranslationPool] Force loading translations for fingerprint: ${fingerprint} (${targetLang}) from server`);
-       await this.loadFingerprintTranslations(fingerprint, fingerprint, targetLang);
-       console.log(`[TranslationPool] Loaded translations for fingerprint: ${fingerprint} (${targetLang})`);
+       // First try to load from localStorage cache
+       const poolKey = this.getPoolKey(fingerprint, targetLang);
+       this.loadLanguageFromStorage(fingerprint, targetLang);
+       
+       const pool = this.pools.get(poolKey);
+       if (pool && pool.size > 0) {
+         // We already have cached translations in localStorage, no need to load from server
+         this.loadedCombinations.add(poolKey);
+         console.log(`[TranslationPool] Using cached translations for fingerprint: ${fingerprint} (${targetLang}) from localStorage (${pool.size} entries)`);
+       } else {
+         // No local cache available, need to load from server
+         console.log(`[TranslationPool] No local cache found, loading translations for fingerprint: ${fingerprint} (${targetLang}) from server`);
+         await this.loadFingerprintTranslations(fingerprint, fingerprint, targetLang);
+         console.log(`[TranslationPool] Loaded translations for fingerprint: ${fingerprint} (${targetLang})`);
+       }
      }
    }
 

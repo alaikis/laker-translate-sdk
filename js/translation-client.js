@@ -4410,7 +4410,7 @@ function mergeTemplate(template, vars) {
     return result;
 }
 // Version from package.json
-const version = '1.6.134';
+const version = '1.6.137';
 class TranslationPool {
     /**
      * Add a pending resolution for a persistent stream request
@@ -4521,9 +4521,8 @@ class TranslationPool {
                 if (colonIndex > 0) {
                     const fingerprint = afterPrefix.substring(0, colonIndex);
                     const toLang = afterPrefix.substring(colonIndex + 1);
-                    if (fingerprint === 'common') {
-                        this.loadLanguageFromStorage(fingerprint, toLang);
-                    }
+                    // Load all cached fingerprints from storage, not just common
+                    this.loadLanguageFromStorage(fingerprint, toLang);
                 }
             }
         }
@@ -4688,39 +4687,50 @@ class TranslationPool {
                 return { text: req.text, translation: req.text, success: false };
             }
         };
-        const promises = requestsToProcess.map(req => processWithRetry(req));
-        const results = await Promise.all(promises);
-        const successCount = results.filter(r => r.success).length;
-        const failCount = results.length - successCount;
-        results.forEach(({ text, translation }, index) => {
-            this.addTranslation(text, translation);
+        // Process requests sequentially (one at a time) instead of in parallel
+        // This allows earlier requests are added to cache before processing next requests
+        // Later requests can hit cache and avoid hitting backend, reducing backend pressure
+        const results = [];
+        let successCount = 0;
+        let failCount = 0;
+        for (let index = 0; index < requestsToProcess.length; index++) {
             const queuedReq = requestsToProcess[index];
-            if (queuedReq && queuedReq.resolveFunction) {
+            const result = await processWithRetry(queuedReq);
+            results.push(result);
+            // Add translation to cache immediately after processing
+            // This allows subsequent requests to hit cache if they're already translated earlier
+            this.addTranslation(result.text, result.translation);
+            if (queuedReq && queuedReq.resolveFunction && result.success) {
                 const response = TranslateStreamResponse.fromJson({
-                    originalText: text,
-                    translation: { [text]: translation },
+                    originalText: result.text,
+                    translation: { [result.text]: result.translation },
                     timestamp: Date.now(),
                     finished: true,
                     batchIndex: 0,
                 });
                 queuedReq.resolveFunction(response);
-                const key = `${text}-${queuedReq.fingerprint || 'common'}`;
+                const key = `${result.text}-${queuedReq.fingerprint || 'common'}`;
                 delete this.pendingResolutions[key];
                 if (this.onTranslationUpdated) {
-                    this.onTranslationUpdated(text, translation);
+                    this.onTranslationUpdated(result.text, result.translation);
+                }
+                if (result.success) {
+                    successCount++;
+                }
+                else {
+                    failCount++;
                 }
             }
-        });
-        requestsToProcess.forEach((queuedReq, index) => {
-            if (!results[index].success && queuedReq.rejectFunction) {
-                const error = new Error(`Translation failed for: ${queuedReq.text}`);
+            if (!result.success && queuedReq.rejectFunction) {
+                const error = new Error(`Translation failed for: "${queuedReq.text}"`);
                 queuedReq.rejectFunction(error);
                 const key = `${queuedReq.text}-${queuedReq.fingerprint || 'common'}`;
                 delete this.pendingResolutions[key];
+                failCount++;
             }
-        });
+        }
         this.broadcastUpdate();
-        console.log(`[TranslationPool] Completed processing ${results.length} queued requests (${successCount} success, ${failCount} failed)`);
+        console.log(`[TranslationPool] Completed processing ${results.length} queued requests (${successCount} success, ${failCount} failed) (sequential processing)`);
         if (this.onQueueProcessed) {
             this.onQueueProcessed(results.length);
         }
@@ -5378,33 +5388,31 @@ class TranslationClient {
         }
         // Use persistent streaming connection for all real-time requests
         // This avoids creating a new HTTP connection for every single word
-        if (this.persistentStreamConnected) {
+        if (this.persistentStreamConnected && this.persistentStreamWriter) {
             return new Promise((resolve, reject) => {
                 const requestId = `${text}-${Date.now()}-${Math.random()}`;
                 const req = TranslateStreamRequest.fromJson({
                     text,
+                    sense_id: this.senseId,
                     to_lang: toLang,
                     from_lang: actualFromLang,
                     fingerprint: actualFingerprint,
                     requestId: requestId,
+                    persistent: true,
                 });
                 // Store the pending resolver in the pool
                 this.pool.addPendingResolver(requestId, (response) => {
                     resolve(response.translation[text] || text);
                 }, reject);
                 // Send the request through the persistent stream
-                if (this.persistentStreamWriter) {
-                    this.persistentStreamWriter(req).catch(err => {
-                        console.error('[TranslationClient] Failed to send request on persistent stream:', err);
-                        reject(err);
-                    });
-                }
-                else {
-                    reject(new Error('Persistent stream not ready'));
-                }
+                this.persistentStreamWriter(req).catch(err => {
+                    console.error('[TranslationClient] Failed to send request on persistent stream:', err);
+                    reject(err);
+                });
             });
         }
-        // Fallback to queued processing with per-request connections if persistent stream not enabled
+        // If persistent stream not connected yet OR still loading translation pool, use queued processing
+        // This ensures requests wait until initialization completes before being processed
         const response = await this.pool.queueTranslationRequest({
             text,
             toLang,

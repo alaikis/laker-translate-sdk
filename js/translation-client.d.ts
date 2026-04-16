@@ -40,7 +40,7 @@ export declare function extractTemplate(text: string): {
  * @returns Merged text with variables substituted
  */
 export declare function mergeTemplate(template: string, vars: Record<string, string | number>): string;
-export declare const version = "1.6.134";
+export declare const version = "1.6.137";
 type CrossTabOptions = {
     enabled: boolean;
     channelName: string;
