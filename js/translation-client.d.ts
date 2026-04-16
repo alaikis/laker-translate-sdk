@@ -100,6 +100,11 @@ declare class TranslationPool {
     entryMetadata: Map<string, CacheEntryMetadata>;
     updateCallback: ((text: string, toLang: string) => void) | null;
     options?: TranslationPoolOptions;
+    /**
+     * Add a pending resolution for a persistent stream request
+     * Used when request has a request_id that will be matched on the response
+     */
+    addPendingResolver(requestId: string, resolve: (response: TranslateStreamResponse) => void, reject: (error: Error) => void): void;
     getPoolKey(fingerprint: string, toLang: string): string;
     constructor(client: TranslationClient, senseId: string, options?: TranslationPoolOptions);
     setTranslationLoadedCallback(callback: (text: string, translation: string) => void): void;
@@ -268,6 +273,10 @@ declare class TranslationClient {
     private senseId;
     private defaultFromLang;
     options: TranslationClientOptions;
+    persistentStream: AsyncIterable<TranslateStreamResponse> | null;
+    persistentStreamWriter: ((req: TranslateStreamRequest) => Promise<void>) | null;
+    persistentStreamReader: (() => Promise<void>) | null;
+    persistentStreamConnected: boolean;
     constructor(options: TranslationClientOptions);
     /**
      * Simple one-shot translation - automatically handles caching, initialization, and queuing
@@ -329,6 +338,24 @@ declare class TranslationClient {
      * @returns The client instance
      */
     getClient(): any;
+    /**
+     * Start a persistent streaming connection for all real-time translation requests.
+     * This reuses a single long-lived HTTP connection for all requests,
+     * avoiding the overhead of creating a new connection for every word.
+     * Only one persistent stream is maintained at a time.
+     * @returns Promise that resolves when the stream is connected and ready
+     */
+    startPersistentStream(): Promise<void>;
+    /**
+     * Stop the persistent streaming connection
+     * Cleans up all pending requests
+     */
+    stopPersistentStream(): void;
+    /**
+     * Check if persistent stream is connected and ready
+     * @returns true if connected and ready
+     */
+    isPersistentStreamConnected(): boolean;
     /**
      * Get information about the current sense
      * @returns Object containing sense ID and default settings
