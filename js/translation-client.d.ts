@@ -40,7 +40,7 @@ export declare function extractTemplate(text: string): {
  * @returns Merged text with variables substituted
  */
 export declare function mergeTemplate(template: string, vars: Record<string, string | number>): string;
-export declare const version = "1.6.137";
+export declare const version = "1.6.139";
 type CrossTabOptions = {
     enabled: boolean;
     channelName: string;
@@ -148,6 +148,20 @@ declare class TranslationPool {
     addPreloadedTranslations(preloaded: Record<string, Record<string, Record<string, string>>>): void;
     addTranslation(text: string, translation: string): void;
     addTranslationToFingerprint(text: string, translation: string, fingerprint: string, toLang: string): void;
+    /**
+     * Correct an existing translation and synchronize the correction to backend database
+     * This updates both the local cache and persists the correction to the server
+     * @param text Original source text
+     * @param correctedTranslation The corrected translation
+     * @param fingerprint Optional fingerprint (uses current fingerprint if not provided)
+     * @param toLang Optional target language (uses current language if not provided)
+     * @param fromLang Optional source language (uses sense default if not provided)
+     * @returns Promise that resolves when correction is saved to server
+     */
+    correctTranslation(text: string, correctedTranslation: string, fingerprint?: string | null, toLang?: string, fromLang?: string): Promise<{
+        success: boolean;
+        error?: string;
+    }>;
     /**
      * Alias for addTranslationToFingerprint - convenient manual caching
      * Parameter order: text, fingerprint, translation, toLang
@@ -298,6 +312,19 @@ declare class TranslationClient {
     * @returns Promise with complete translation response
     */
     translateWithDetails(text: string, toLang: string, fromLang?: string, fingerprint?: string, timeoutMs?: number): Promise<TranslateStreamResponse>;
+    /**
+     * Translate multiple uncached texts in a single batch streaming request
+     * All requests are sent over ONE HTTP connection, only shows one request in browser network panel
+     * Greatly reduces the number of visible requests during page initialization
+     * @param texts Array of text objects to translate ({text, fromLang})
+     * @param toLang Target language for all translations
+     * @param fingerprint Optional fingerprint
+     * @returns Async iterable stream of translation responses as they arrive
+     */
+    translateBatchUncached(texts: Array<{
+        text: string;
+        fromLang?: string;
+    }>, toLang: string, fingerprint?: string): AsyncIterable<TranslateStreamResponse>;
     /**
      * Stream translation batches for a semantic sense
      * Uses native Connect RPC streaming with true multiplexing

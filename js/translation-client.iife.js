@@ -5682,7 +5682,7 @@ var LakerTranslation = (function (exports) {
         return result;
     }
     // Version from package.json
-    const version = '1.6.137';
+    const version = '1.6.139';
     class TranslationPool {
         /**
          * Add a pending resolution for a persistent stream request
@@ -5936,75 +5936,117 @@ var LakerTranslation = (function (exports) {
             this.loading = false;
             const requestsToProcess = [...this.queuedRequests];
             this.queuedRequests = [];
-            const processWithRetry = async (req, attempt = 0) => {
-                try { // Always check in-memory cache first - if found, use immediately
-                    const lookup = this.lookup(req.text, req.fingerprint, req.toLang);
-                    if (lookup.found && lookup.translation) {
-                        // Already in cache, use cached value directly - no need to request
-                        return { text: req.text, translation: lookup.translation, success: true };
-                    }
-                    else {
-                        // Not in in-memory cache, request from server
-                        const response = await this.client.translateWithDetails(req.text, req.toLang, req.fromLang, req.fingerprint);
-                        return { text: req.text, translation: response.translation[req.text] || req.text, success: true };
-                    }
-                }
-                catch (error) {
-                    console.warn(`[TranslationPool] Request failed (attempt ${attempt + 1}/${maxRetries}):`, error.message);
-                    if (attempt < maxRetries - 1) {
-                        await new Promise(resolve => setTimeout(resolve, retryDelayMs * (attempt + 1)));
-                        return processWithRetry(req, attempt + 1);
-                    }
-                    console.error(`[TranslationPool] All retries failed for: "${req.text}", using original text`);
-                    return { text: req.text, translation: req.text, success: false };
-                }
-            };
-            // Process requests sequentially (one at a time) instead of in parallel
-            // This allows earlier requests are added to cache before processing next requests
-            // Later requests can hit cache and avoid hitting backend, reducing backend pressure
-            const results = [];
-            let successCount = 0;
-            let failCount = 0;
-            for (let index = 0; index < requestsToProcess.length; index++) {
-                const queuedReq = requestsToProcess[index];
-                const result = await processWithRetry(queuedReq);
-                results.push(result);
-                // Add translation to cache immediately after processing
-                // This allows subsequent requests to hit cache if they're already translated earlier
-                this.addTranslation(result.text, result.translation);
-                if (queuedReq && queuedReq.resolveFunction && result.success) {
+            // Filter out requests that are already cached - no need to request them from server
+            const uncachedRequests = [];
+            let cachedCount = 0;
+            for (const req of requestsToProcess) {
+                const lookup = this.lookup(req.text, req.fingerprint, req.toLang);
+                if (lookup.found && lookup.translation) {
+                    // Already in cache, resolve immediately
+                    cachedCount++;
+                    this.addTranslation(req.text, lookup.translation);
                     const response = TranslateStreamResponse.fromJson({
-                        originalText: result.text,
-                        translation: { [result.text]: result.translation },
+                        originalText: req.text,
+                        translation: { [req.text]: lookup.translation },
                         timestamp: Date.now(),
                         finished: true,
                         batchIndex: 0,
                     });
-                    queuedReq.resolveFunction(response);
-                    const key = `${result.text}-${queuedReq.fingerprint || 'common'}`;
+                    req.resolveFunction(response);
+                    const key = `${req.text}-${req.fingerprint || 'common'}`;
                     delete this.pendingResolutions[key];
                     if (this.onTranslationUpdated) {
-                        this.onTranslationUpdated(result.text, result.translation);
+                        this.onTranslationUpdated(req.text, lookup.translation);
                     }
-                    if (result.success) {
-                        successCount++;
+                }
+                else {
+                    uncachedRequests.push(req);
+                }
+            }
+            if (uncachedRequests.length === 0) {
+                this.broadcastUpdate();
+                console.log(`[TranslationPool] All ${cachedCount} requests found in cache`);
+                if (this.onQueueProcessed) {
+                    this.onQueueProcessed(requestsToProcess.length);
+                }
+                return;
+            }
+            console.log(`[TranslationPool] ${cachedCount} cached, ${uncachedRequests.length} uncached requesting from server in a single batch`);
+            // Batch all uncached requests into a single streaming connection
+            // This creates only ONE HTTP request in browser dev tools for all queued requests
+            // Greatly improves connection reuse and reduces network overhead
+            let successCount = cachedCount;
+            let failCount = 0;
+            // Get the common target language from the first request (they all should be same during init)
+            const firstReq = uncachedRequests[0];
+            const commonToLang = firstReq.toLang;
+            const commonFingerprint = firstReq.fingerprint || this.currentFingerprint || 'common';
+            try {
+                // Use the client to do a batch translate stream - all requests in one HTTP connection
+                // This shows only ONE request in browser network panel
+                const stream = this.client.translateBatchUncached(uncachedRequests.map(r => ({ text: r.text, fromLang: r.fromLang })), commonToLang, commonFingerprint);
+                for await (const response of stream) {
+                    // Process each translation as it arrives
+                    if (response.translation) {
+                        for (const [text, translation] of Object.entries(response.translation)) {
+                            // Find the original pending request
+                            const pendingReq = uncachedRequests.find(r => r.text === text);
+                            if (pendingReq) {
+                                // Add to cache immediately
+                                this.addTranslation(text, translation);
+                                // Resolve the pending promise
+                                const fullResponse = TranslateStreamResponse.fromJson({
+                                    originalText: text,
+                                    translation: { [text]: translation },
+                                    timestamp: Date.now(),
+                                    finished: response.finished && Object.keys(response.translation).length === 0,
+                                    batchIndex: response.batchIndex || 0,
+                                });
+                                pendingReq.resolveFunction(fullResponse);
+                                const key = `${text}-${pendingReq.fingerprint || 'common'}`;
+                                delete this.pendingResolutions[key];
+                                if (this.onTranslationUpdated) {
+                                    this.onTranslationUpdated(text, translation);
+                                }
+                                successCount++;
+                            }
+                        }
                     }
-                    else {
+                    if (response.finished) {
+                        break;
+                    }
+                }
+                // Check for any pending requests that didn't get a response - they failed
+                for (const pendingReq of uncachedRequests) {
+                    const key = `${pendingReq.text}-${pendingReq.fingerprint || 'common'}`;
+                    if (this.pendingResolutions[key]) {
+                        // Still pending, means no response from server - fail it
+                        if (pendingReq.rejectFunction) {
+                            const error = new Error(`No translation response received for: "${pendingReq.text}"`);
+                            pendingReq.rejectFunction(error);
+                        }
+                        delete this.pendingResolutions[key];
                         failCount++;
                     }
                 }
-                if (!result.success && queuedReq.rejectFunction) {
-                    const error = new Error(`Translation failed for: "${queuedReq.text}"`);
-                    queuedReq.rejectFunction(error);
-                    const key = `${queuedReq.text}-${queuedReq.fingerprint || 'common'}`;
-                    delete this.pendingResolutions[key];
-                    failCount++;
+            }
+            catch (error) {
+                console.error(`[TranslationPool] Batch request failed:`, error.message);
+                // If batch fails, fail all remaining requests
+                for (const pendingReq of uncachedRequests) {
+                    const key = `${pendingReq.text}-${pendingReq.fingerprint || 'common'}`;
+                    if (this.pendingResolutions[key] && pendingReq.rejectFunction) {
+                        const error = new Error(`Batch translation failed for: "${pendingReq.text}"`);
+                        pendingReq.rejectFunction(error);
+                        delete this.pendingResolutions[key];
+                        failCount++;
+                    }
                 }
             }
             this.broadcastUpdate();
-            console.log(`[TranslationPool] Completed processing ${results.length} queued requests (${successCount} success, ${failCount} failed) (sequential processing)`);
+            console.log(`[TranslationPool] Completed processing ${requestsToProcess.length} queued requests: ${successCount} success, ${failCount} failed (batch processing)`);
             if (this.onQueueProcessed) {
-                this.onQueueProcessed(results.length);
+                this.onQueueProcessed(requestsToProcess.length);
             }
             if (failCount > 0) {
                 console.warn(`[TranslationPool] ${failCount} requests failed after ${maxRetries} retries`);
@@ -6225,6 +6267,59 @@ var LakerTranslation = (function (exports) {
             this.broadcastUpdate(text, translation);
         }
         /**
+         * Correct an existing translation and synchronize the correction to backend database
+         * This updates both the local cache and persists the correction to the server
+         * @param text Original source text
+         * @param correctedTranslation The corrected translation
+         * @param fingerprint Optional fingerprint (uses current fingerprint if not provided)
+         * @param toLang Optional target language (uses current language if not provided)
+         * @param fromLang Optional source language (uses sense default if not provided)
+         * @returns Promise that resolves when correction is saved to server
+         */
+        async correctTranslation(text, correctedTranslation, fingerprint, toLang, fromLang) {
+            const fp = fingerprint || this.currentFingerprint || 'common';
+            const lang = toLang || this.currentToLang;
+            if (!lang) {
+                console.error('[TranslationPool] Cannot correct translation: target language not set');
+                return { success: false, error: 'Target language not set' };
+            }
+            // First update local cache immediately so UI reflects the correction
+            this.addTranslationToFingerprint(text, correctedTranslation, fp, lang);
+            // Trigger callback for UI updates
+            if (this.onTranslationUpdated) {
+                this.onTranslationUpdated(text, correctedTranslation);
+            }
+            try {
+                // Send correction to backend to persist in database
+                const requestId = `correct-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                const jsonRequest = {
+                    requestId,
+                    text,
+                    fromLang: fromLang || '',
+                    toLang: lang,
+                    fingerprint: fp,
+                    isCorrection: true,
+                    correctedTranslation,
+                };
+                if (this.senseId && this.senseId.length > 0) {
+                    jsonRequest.senseId = this.senseId;
+                }
+                const req = TranslateStreamRequest.fromJson(jsonRequest);
+                const stream = this.client.client.translateStream(req);
+                for await (const response of stream) {
+                    if (response.finished) {
+                        console.log(`[TranslationPool] Correction saved for "${text}" → "${correctedTranslation}"`);
+                        return { success: true };
+                    }
+                }
+                return { success: true };
+            }
+            catch (error) {
+                console.error(`[TranslationPool] Failed to save correction for "${text}":`, error);
+                return { success: false, error: error instanceof Error ? error.message : String(error) };
+            }
+        }
+        /**
          * Alias for addTranslationToFingerprint - convenient manual caching
          * Parameter order: text, fingerprint, translation, toLang
          */
@@ -6240,14 +6335,48 @@ var LakerTranslation = (function (exports) {
             const lang = toLang || this.currentToLang || 'en';
             const poolKey = this.getPoolKey(fp, lang);
             const pool = this.pools.get(poolKey);
+            // Check if found in specific pool
             if (pool && pool.has(text)) {
-                return { found: true, fromCache: true, translation: pool.get(text) };
+                const translation = pool.get(text);
+                // Check metadata to see if this entry is stale - trigger background update
+                const metadataKey = `${text}|${lang}`;
+                const metadata = this.entryMetadata.get(metadataKey);
+                const now = Date.now();
+                const staleThreshold = this.backgroundUpdateOptions.staleThresholdMs;
+                if (this.backgroundUpdateOptions.enabled && (!metadata || now - metadata.lastUpdated > staleThreshold)) {
+                    // Stale cache entry - trigger asynchronous background check for updates
+                    // This will fetch the latest translation (including any manual corrections) from backend
+                    // If updated, cache will be updated automatically and UI will be notified
+                    setTimeout(() => {
+                        if (this.updateCallback) {
+                            this.updateCallback(text, lang);
+                            // Update timestamp immediately to avoid repeated triggers
+                            this.updateEntryMetadata(text, lang);
+                        }
+                    }, 0);
+                }
+                return { found: true, fromCache: true, translation };
             }
+            // Check common pool if not found in specific fingerprint
             if (fp !== 'common') {
                 const commonPoolKey = this.getPoolKey('common', lang);
                 const commonPool = this.pools.get(commonPoolKey);
                 if (commonPool && commonPool.has(text)) {
-                    return { found: true, fromCache: true, translation: commonPool.get(text) };
+                    const translation = commonPool.get(text);
+                    // Same stale check for common pool entries
+                    const metadataKey = `${text}|${lang}`;
+                    const metadata = this.entryMetadata.get(metadataKey);
+                    const now = Date.now();
+                    const staleThreshold = this.backgroundUpdateOptions.staleThresholdMs;
+                    if (this.backgroundUpdateOptions.enabled && (!metadata || now - metadata.lastUpdated > staleThreshold)) {
+                        setTimeout(() => {
+                            if (this.updateCallback) {
+                                this.updateCallback(text, lang);
+                                this.updateEntryMetadata(text, lang);
+                            }
+                        }, 0);
+                    }
+                    return { found: true, fromCache: true, translation };
                 }
             }
             return { found: false, fromCache: false };
@@ -6819,6 +6948,27 @@ var LakerTranslation = (function (exports) {
             // If no response, throw an error
             console.error(`[TranslationClient] No translation response received for "${text}"`);
             throw new Error('No translation response received');
+        }
+        /**
+         * Translate multiple uncached texts in a single batch streaming request
+         * All requests are sent over ONE HTTP connection, only shows one request in browser network panel
+         * Greatly reduces the number of visible requests during page initialization
+         * @param texts Array of text objects to translate ({text, fromLang})
+         * @param toLang Target language for all translations
+         * @param fingerprint Optional fingerprint
+         * @returns Async iterable stream of translation responses as they arrive
+         */
+        translateBatchUncached(texts, toLang, fingerprint) {
+            // All requests go in the same single HTTP/2 streaming connection
+            // This creates only ONE request entry in browser developer tools network panel
+            const req = TranslateStreamRequest.fromJson({
+                sense_id: this.senseId,
+                dst_lang: toLang,
+                fingerprint,
+                persistent: false,
+            });
+            const stream = this.client.translateStream(req);
+            return stream;
         }
         /**
          * Stream translation batches for a semantic sense
