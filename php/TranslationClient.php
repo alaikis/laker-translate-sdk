@@ -617,4 +617,4 @@ class Client
         $data = json_decode($content, true);
         return is_array($data) ? $data : [];
     }
-    }
+}

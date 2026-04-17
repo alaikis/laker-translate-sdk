@@ -4328,12 +4328,20 @@ function handleStreamResponse(stream, options) {
  */
 // Import generated Connect RPC code
 let createConnectTransport;
+// Detect environment:
+// - Browser (window exists) → use connect-web
+// - React Native / Expo (navigator.product === 'ReactNative' || global?.__DEV__) → use connect-web
+// - Node.js → use connect-node
+const isReactNative = typeof navigator !== 'undefined' && navigator.product === 'ReactNative' ||
+    typeof global !== 'undefined' && global.__DEV__ !== undefined;
+const isBrowser = typeof window !== 'undefined' || isReactNative;
+const hasFetch = typeof fetch === 'function';
 // Check if browser already preloaded the transport (for IIFE standalone build)
-if (typeof window !== 'undefined' && window.__LAKER_BROWSER_TRANSPORT) {
+if (isBrowser && typeof window !== 'undefined' && window.__LAKER_BROWSER_TRANSPORT) {
     createConnectTransport = window.__LAKER_BROWSER_TRANSPORT;
 }
-else if (typeof fetch === 'function' && typeof window !== 'undefined') {
-    // Browser environment (Vite/Webpack ESM or CJS build) - use statically imported version
+else if (hasFetch && isBrowser) {
+    // Browser / React Native / Expo environment - use statically imported connect-web
     // User's project already has @connectrpc/connect-web as dependency so it's available
     createConnectTransport = createConnectTransport$1;
 }
