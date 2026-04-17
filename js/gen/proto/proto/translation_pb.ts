@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file proto/translation.proto.
  */
 export const file_proto_translation: GenFile = /*@__PURE__*/
-  fileDesc("Chdwcm90by90cmFuc2xhdGlvbi5wcm90bxILdHJhbnNsYXRpb24idwoYR2V0U2Vuc2VUcmFuc2xhdGVSZXF1ZXN0EhAKCHNlbnNlX2lkGAEgASgJEhgKC2ZpbmdlcnByaW50GAIgASgJSACIAQESDAoEcGFnZRgDIAEoBRIRCglwYWdlX3NpemUYBCABKAVCDgoMX2ZpbmdlcnByaW50IjIKD1RyYW5zbGF0ZVJlY29yZBIMCgR0ZXh0GAEgASgJEhEKCXRyYW5zbGF0ZRgCIAEoCSLgAgoZR2V0U2Vuc2VUcmFuc2xhdGVSZXNwb25zZRJCCgZjb21tb24YASADKAsyMi50cmFuc2xhdGlvbi5HZXRTZW5zZVRyYW5zbGF0ZVJlc3BvbnNlLkNvbW1vbkVudHJ5EkQKB3NwZWNpYWwYAiADKAsyMy50cmFuc2xhdGlvbi5HZXRTZW5zZVRyYW5zbGF0ZVJlc3BvbnNlLlNwZWNpYWxFbnRyeRIMCgRwYWdlGAMgASgFEhEKCXBhZ2Vfc2l6ZRgEIAEoBRINCgV0b3RhbBgFIAEoAxITCgt0b3RhbF9wYWdlcxgGIAEoAxIVCg1zcGVjaWFsX3RvdGFsGAcgASgDGi0KC0NvbW1vbkVudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEaLgoMU3BlY2lhbEVudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEi5QEKFlRyYW5zbGF0ZVN0cmVhbVJlcXVlc3QSDAoEdGV4dBgBIAEoCRIQCghzZW5zZV9pZBgCIAEoCRITCgtmaW5nZXJwcmludBgDIAEoCRIRCglmcm9tX2xhbmcYBCABKAkSDwoHdG9fbGFuZxgFIAEoCRIQCghzcmNfbGFuZxgGIAEoCRIQCghkc3RfbGFuZxgHIAEoCRIXCgpyZXF1ZXN0X2lkGAggASgJSACIAQESFwoKcGVyc2lzdGVudBgJIAEoCEgBiAEBQg0KC19yZXF1ZXN0X2lkQg0KC19wZXJzaXN0ZW50IpICChdUcmFuc2xhdGVTdHJlYW1SZXNwb25zZRIVCg1vcmlnaW5hbF90ZXh0GAEgASgJEkoKC3RyYW5zbGF0aW9uGAIgAygLMjUudHJhbnNsYXRpb24uVHJhbnNsYXRlU3RyZWFtUmVzcG9uc2UuVHJhbnNsYXRpb25FbnRyeRIRCgl0aW1lc3RhbXAYAyABKAMSEAoIZmluaXNoZWQYBCABKAgSEwoLYmF0Y2hfaW5kZXgYBSABKAUSFwoKcmVxdWVzdF9pZBgGIAEoCUgAiAEBGjIKEFRyYW5zbGF0aW9uRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4AUINCgtfcmVxdWVzdF9pZDKFAgoSVHJhbnNsYXRpb25TZXJ2aWNlEowBChFHZXRTZW5zZVRyYW5zbGF0ZRIlLnRyYW5zbGF0aW9uLkdldFNlbnNlVHJhbnNsYXRlUmVxdWVzdBomLnRyYW5zbGF0aW9uLkdldFNlbnNlVHJhbnNsYXRlUmVzcG9uc2UiKILT5JMCIhIgL3YxL3RyYW5zbGF0aW9uL3NlbnNlL3tzZW5zZV9pZH0SYAoPVHJhbnNsYXRlU3RyZWFtEiMudHJhbnNsYXRpb24uVHJhbnNsYXRlU3RyZWFtUmVxdWVzdBokLnRyYW5zbGF0aW9uLlRyYW5zbGF0ZVN0cmVhbVJlc3BvbnNlIgAwAUI0WjJhcGkubGFrZXIuZGV2L3Byb3RvL2dlbi9nby90cmFuc2xhdGlvbjt0cmFuc2xhdGlvbmIGcHJvdG8z", [file_google_api_annotations]);
+  fileDesc("Chdwcm90by90cmFuc2xhdGlvbi5wcm90bxILdHJhbnNsYXRpb24imwEKGEdldFNlbnNlVHJhbnNsYXRlUmVxdWVzdBIQCghzZW5zZV9pZBgBIAEoCRIYCgtmaW5nZXJwcmludBgCIAEoCUgAiAEBEgwKBHBhZ2UYAyABKAUSEQoJcGFnZV9zaXplGAQgASgFEhEKCWZyb21fbGFuZxgFIAEoCRIPCgd0b19sYW5nGAYgASgJQg4KDF9maW5nZXJwcmludCIyCg9UcmFuc2xhdGVSZWNvcmQSDAoEdGV4dBgBIAEoCRIRCgl0cmFuc2xhdGUYAiABKAki4AIKGUdldFNlbnNlVHJhbnNsYXRlUmVzcG9uc2USQgoGY29tbW9uGAEgAygLMjIudHJhbnNsYXRpb24uR2V0U2Vuc2VUcmFuc2xhdGVSZXNwb25zZS5Db21tb25FbnRyeRJECgdzcGVjaWFsGAIgAygLMjMudHJhbnNsYXRpb24uR2V0U2Vuc2VUcmFuc2xhdGVSZXNwb25zZS5TcGVjaWFsRW50cnkSDAoEcGFnZRgDIAEoBRIRCglwYWdlX3NpemUYBCABKAUSDQoFdG90YWwYBSABKAMSEwoLdG90YWxfcGFnZXMYBiABKAMSFQoNc3BlY2lhbF90b3RhbBgHIAEoAxotCgtDb21tb25FbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGi4KDFNwZWNpYWxFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBItECChZUcmFuc2xhdGVTdHJlYW1SZXF1ZXN0EgwKBHRleHQYASABKAkSEAoIc2Vuc2VfaWQYAiABKAkSEwoLZmluZ2VycHJpbnQYAyABKAkSEQoJZnJvbV9sYW5nGAQgASgJEg8KB3RvX2xhbmcYBSABKAkSEAoIc3JjX2xhbmcYBiABKAkSEAoIZHN0X2xhbmcYByABKAkSFwoKcmVxdWVzdF9pZBgIIAEoCUgAiAEBEhcKCnBlcnNpc3RlbnQYCSABKAhIAYgBARIaCg1pc19jb3JyZWN0aW9uGAogASgISAKIAQESIgoVY29ycmVjdGVkX3RyYW5zbGF0aW9uGAsgASgJSAOIAQFCDQoLX3JlcXVlc3RfaWRCDQoLX3BlcnNpc3RlbnRCEAoOX2lzX2NvcnJlY3Rpb25CGAoWX2NvcnJlY3RlZF90cmFuc2xhdGlvbiLaAgoXVHJhbnNsYXRlU3RyZWFtUmVzcG9uc2USFQoNb3JpZ2luYWxfdGV4dBgBIAEoCRJKCgt0cmFuc2xhdGlvbhgCIAMoCzI1LnRyYW5zbGF0aW9uLlRyYW5zbGF0ZVN0cmVhbVJlc3BvbnNlLlRyYW5zbGF0aW9uRW50cnkSEQoJdGltZXN0YW1wGAMgASgDEhAKCGZpbmlzaGVkGAQgASgIEhMKC2JhdGNoX2luZGV4GAUgASgFEhcKCnJlcXVlc3RfaWQYBiABKAlIAIgBARIVCghzcmNfbGFuZxgHIAEoCUgBiAEBEhUKCGRzdF9sYW5nGAggASgJSAKIAQEaMgoQVHJhbnNsYXRpb25FbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBQg0KC19yZXF1ZXN0X2lkQgsKCV9zcmNfbGFuZ0ILCglfZHN0X2xhbmcyhQIKElRyYW5zbGF0aW9uU2VydmljZRKMAQoRR2V0U2Vuc2VUcmFuc2xhdGUSJS50cmFuc2xhdGlvbi5HZXRTZW5zZVRyYW5zbGF0ZVJlcXVlc3QaJi50cmFuc2xhdGlvbi5HZXRTZW5zZVRyYW5zbGF0ZVJlc3BvbnNlIiiC0+STAiISIC92MS90cmFuc2xhdGlvbi9zZW5zZS97c2Vuc2VfaWR9EmAKD1RyYW5zbGF0ZVN0cmVhbRIjLnRyYW5zbGF0aW9uLlRyYW5zbGF0ZVN0cmVhbVJlcXVlc3QaJC50cmFuc2xhdGlvbi5UcmFuc2xhdGVTdHJlYW1SZXNwb25zZSIAMAFCNFoyYXBpLmxha2VyLmRldi9wcm90by9nZW4vZ28vdHJhbnNsYXRpb247dHJhbnNsYXRpb25iBnByb3RvMw", [file_google_api_annotations]);
 
 /**
  * GetSenseTranslateRequest 查询指定sense的翻译请求
@@ -46,6 +46,20 @@ export type GetSenseTranslateRequest = Message<"translation.GetSenseTranslateReq
    * @generated from field: int32 page_size = 4;
    */
   pageSize: number;
+
+  /**
+   * 源语言过滤，可选，只返回指定源语言的翻译
+   *
+   * @generated from field: string from_lang = 5;
+   */
+  fromLang: string;
+
+  /**
+   * 目标语言过滤，可选，只返回指定目标语言的翻译
+   *
+   * @generated from field: string to_lang = 6;
+   */
+  toLang: string;
 };
 
 /**
@@ -216,6 +230,22 @@ export type TranslateStreamRequest = Message<"translation.TranslateStreamRequest
    * @generated from field: optional bool persistent = 9;
    */
   persistent?: boolean;
+
+  /**
+   * 是否是人工翻译纠正请求
+   * 当用户人工纠正翻译后，设置为 true，同时提供 corrected_translation
+   *
+   * @generated from field: optional bool is_correction = 10;
+   */
+  isCorrection?: boolean;
+
+  /**
+   * 人工纠正后的翻译结果
+   * 配合 is_correction=true 使用
+   *
+   * @generated from field: optional string corrected_translation = 11;
+   */
+  correctedTranslation?: string;
 };
 
 /**
@@ -273,6 +303,22 @@ export type TranslateStreamResponse = Message<"translation.TranslateStreamRespon
    * @generated from field: optional string request_id = 6;
    */
   requestId?: string;
+
+  /**
+   * 源语言代码
+   * JS SDK可以根据返回的src_lang决定缓存键
+   *
+   * @generated from field: optional string src_lang = 7;
+   */
+  srcLang?: string;
+
+  /**
+   * 目标语言代码
+   * JS SDK可以根据返回的dst_lang决定缓存键
+   *
+   * @generated from field: optional string dst_lang = 8;
+   */
+  dstLang?: string;
 };
 
 /**

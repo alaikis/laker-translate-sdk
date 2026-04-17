@@ -34,6 +34,18 @@ export type GetSenseTranslateRequest = Message<"translation.GetSenseTranslateReq
      * @generated from field: int32 page_size = 4;
      */
     pageSize: number;
+    /**
+     * 源语言过滤，可选，只返回指定源语言的翻译
+     *
+     * @generated from field: string from_lang = 5;
+     */
+    fromLang: string;
+    /**
+     * 目标语言过滤，可选，只返回指定目标语言的翻译
+     *
+     * @generated from field: string to_lang = 6;
+     */
+    toLang: string;
 };
 /**
  * Describes the message translation.GetSenseTranslateRequest.
@@ -184,6 +196,20 @@ export type TranslateStreamRequest = Message<"translation.TranslateStreamRequest
      * @generated from field: optional bool persistent = 9;
      */
     persistent?: boolean;
+    /**
+     * 是否是人工翻译纠正请求
+     * 当用户人工纠正翻译后，设置为 true，同时提供 corrected_translation
+     *
+     * @generated from field: optional bool is_correction = 10;
+     */
+    isCorrection?: boolean;
+    /**
+     * 人工纠正后的翻译结果
+     * 配合 is_correction=true 使用
+     *
+     * @generated from field: optional string corrected_translation = 11;
+     */
+    correctedTranslation?: string;
 };
 /**
  * Describes the message translation.TranslateStreamRequest.
@@ -235,6 +261,20 @@ export type TranslateStreamResponse = Message<"translation.TranslateStreamRespon
      * @generated from field: optional string request_id = 6;
      */
     requestId?: string;
+    /**
+     * 源语言代码
+     * JS SDK可以根据返回的src_lang决定缓存键
+     *
+     * @generated from field: optional string src_lang = 7;
+     */
+    srcLang?: string;
+    /**
+     * 目标语言代码
+     * JS SDK可以根据返回的dst_lang决定缓存键
+     *
+     * @generated from field: optional string dst_lang = 8;
+     */
+    dstLang?: string;
 };
 /**
  * Describes the message translation.TranslateStreamResponse.

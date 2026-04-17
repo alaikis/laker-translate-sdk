@@ -11,6 +11,7 @@
  */
 import { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord } from './gen/translation_pb';
 import type { Transport } from '@connectrpc/connect';
+import { TranslationIndexedDB } from './indexeddb';
 export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord, };
 export type GetSenseTranslateRequestOptions = {
     senseId: string;
@@ -58,6 +59,12 @@ type TranslationPoolOptions = {
     backgroundUpdate?: Partial<BackgroundUpdateOptions>;
     senseId?: string;
     defaultFromLang?: string;
+    /**
+     * Whether to use IndexedDB instead of localStorage for browser cache storage
+     * IndexedDB is recommended for large translation datasets (more than a few MBs)
+     * Default: false (use localStorage)
+     */
+    useIndexedDB?: boolean;
 };
 type PendingRequest = {
     text: string;
@@ -100,6 +107,8 @@ declare class TranslationPool {
     entryMetadata: Map<string, CacheEntryMetadata>;
     updateCallback: ((text: string, toLang: string) => void) | null;
     options?: TranslationPoolOptions;
+    indexedDB: TranslationIndexedDB | null;
+    useIndexedDB: boolean;
     /**
      * Add a pending resolution for a persistent stream request
      * Used when request has a request_id that will be matched on the response
@@ -113,9 +122,21 @@ declare class TranslationPool {
     setTranslationUpdatedCallback(callback: (text: string, translation: string) => void): void;
     initCrossTabSync(): void;
     loadFromStorage(): void;
+    /**
+     * Load translations from IndexedDB
+     */
+    loadFromIndexedDB(): Promise<void>;
     loadLanguageFromStorage(fingerprint: string, toLang: string): void;
+    /**
+     * Load translations for a specific fingerprint and language from IndexedDB
+     */
+    loadLanguageFromIndexedDB(fingerprint: string, toLang: string): Promise<void>;
     getStorageKey(fingerprint: string, toLang: string): string;
     saveToStorage(fingerprint: string, toLang: string): void;
+    /**
+     * Save translations to IndexedDB
+     */
+    saveToIndexedDB(fingerprint: string, toLang: string): Promise<void>;
     broadcastUpdate(text?: string, translation?: string): void;
     handleCacheUpdate(message: {
         fingerprint?: string;
@@ -146,7 +167,7 @@ declare class TranslationPool {
     initialize(toLang: string): Promise<void>;
     loadFingerprintTranslations(fp: string, fingerprint: string | undefined, toLang: string): Promise<void>;
     addPreloadedTranslations(preloaded: Record<string, Record<string, Record<string, string>>>): void;
-    addTranslation(text: string, translation: string): void;
+    addTranslation(text: string, translation: string, toLang?: string): void;
     addTranslationToFingerprint(text: string, translation: string, fingerprint: string, toLang: string): void;
     /**
      * Correct an existing translation and synchronize the correction to backend database

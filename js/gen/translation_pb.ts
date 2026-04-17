@@ -339,6 +339,30 @@ export class TranslateStreamResponse extends Message<TranslateStreamResponse> {
    */
   batchIndex = 0;
 
+  /**
+   * 请求唯一ID，匹配请求的 request_id
+   * 如果是持久流式连接，必须携带 request_id
+   *
+   * @generated from field: optional string request_id = 6;
+   */
+  requestId?: string;
+
+  /**
+   * 源语言代码
+   * JS SDK可以根据返回的src_lang决定缓存键
+   *
+   * @generated from field: optional string src_lang = 7;
+   */
+  srcLang?: string;
+
+  /**
+   * 目标语言代码
+   * JS SDK可以根据返回的dst_lang决定缓存键
+   *
+   * @generated from field: optional string dst_lang = 8;
+   */
+  dstLang?: string;
+
   constructor(data?: PartialMessage<TranslateStreamResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -352,6 +376,9 @@ export class TranslateStreamResponse extends Message<TranslateStreamResponse> {
     { no: 3, name: "timestamp", kind: "scalar", T: 3 /* ScalarType.INT64 */ },
     { no: 4, name: "finished", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 5, name: "batch_index", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
+    { no: 6, name: "request_id", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
+    { no: 7, name: "src_lang", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
+    { no: 8, name: "dst_lang", kind: "scalar", T: 9 /* ScalarType.STRING */, opt: true },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TranslateStreamResponse {

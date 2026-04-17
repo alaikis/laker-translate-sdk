@@ -222,6 +222,27 @@ export declare class TranslateStreamResponse extends Message<TranslateStreamResp
      * @generated from field: int32 batch_index = 5;
      */
     batchIndex: number;
+    /**
+     * 请求唯一ID，匹配请求的 request_id
+     * 如果是持久流式连接，必须携带 request_id
+     *
+     * @generated from field: optional string request_id = 6;
+     */
+    requestId?: string;
+    /**
+     * 源语言代码
+     * JS SDK可以根据返回的src_lang决定缓存键
+     *
+     * @generated from field: optional string src_lang = 7;
+     */
+    srcLang?: string;
+    /**
+     * 目标语言代码
+     * JS SDK可以根据返回的dst_lang决定缓存键
+     *
+     * @generated from field: optional string dst_lang = 8;
+     */
+    dstLang?: string;
     constructor(data?: PartialMessage<TranslateStreamResponse>);
     static readonly runtime: typeof proto3;
     static readonly typeName = "translation.TranslateStreamResponse";

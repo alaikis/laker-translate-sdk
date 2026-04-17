@@ -22,6 +22,9 @@ import { TranslationService } from './gen/translation_connect';
 import { createClient } from '@connectrpc/connect';
 import type { Transport, Interceptor } from '@connectrpc/connect';
 
+// Import IndexedDB wrapper for browser cache storage
+import { TranslationIndexedDB, defaultTranslationDB } from './indexeddb';
+
 // For browser environments, we statically import connect-web
 // because it's already external in the rollup config and user's project has it installed
 // This ensures createConnectTransport is available synchronously
@@ -192,6 +195,12 @@ type TranslationPoolOptions = {
   backgroundUpdate?: Partial<BackgroundUpdateOptions>;
   senseId?: string;
   defaultFromLang?: string;
+  /**
+   * Whether to use IndexedDB instead of localStorage for browser cache storage
+   * IndexedDB is recommended for large translation datasets (more than a few MBs)
+   * Default: false (use localStorage)
+   */
+  useIndexedDB?: boolean;
 };
 
 type PendingRequest = {
@@ -241,6 +250,10 @@ class TranslationPool {
   entryMetadata = new Map<string, CacheEntryMetadata>();
   updateCallback: ((text: string, toLang: string) => void) | null = null;
   options?: TranslationPoolOptions;
+  // IndexedDB instance for browser cache storage (replaces localStorage for large datasets)
+  indexedDB: TranslationIndexedDB | null = null;
+  // Whether to use IndexedDB instead of localStorage (browser only, for large datasets)
+  useIndexedDB: boolean = false;
 
   /**
    * Add a pending resolution for a persistent stream request
@@ -295,6 +308,26 @@ class TranslationPool {
     if (this.crossTabOptions.enabled && typeof BroadcastChannel !== 'undefined') {
       this.initCrossTabSync();
     }
+    
+    // Initialize IndexedDB for browser cache storage (replaces localStorage for large datasets)
+    // Only use IndexedDB in browser environment when explicitly enabled or when localStorage is unavailable
+    const useIndexedDBOption = options?.useIndexedDB ?? false;
+    const isBrowserWithIDB = typeof indexedDB !== 'undefined';
+    
+    if (useIndexedDBOption && isBrowserWithIDB) {
+      this.useIndexedDB = true;
+      this.indexedDB = new TranslationIndexedDB({
+        databaseName: `laker-translation-${senseId}`,
+        storeName: 'translations',
+      });
+      // Initialize the database asynchronously
+      this.indexedDB.init().catch(err => {
+        console.warn('[TranslationPool] Failed to initialize IndexedDB, falling back to localStorage:', err);
+        this.useIndexedDB = false;
+        this.indexedDB = null;
+      });
+    }
+    
     this.loadFromStorage();
     this.startBackgroundUpdateChecker();
   }
@@ -350,6 +383,12 @@ class TranslationPool {
   }
 
   loadFromStorage(): void {
+    // If IndexedDB is enabled, load from IndexedDB instead of localStorage
+    if (this.useIndexedDB && this.indexedDB) {
+      this.loadFromIndexedDB();
+      return;
+    }
+    
     if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
       return;
     }
@@ -369,8 +408,60 @@ class TranslationPool {
     }
   }
 
+  /**
+   * Load translations from IndexedDB
+   */
+  async loadFromIndexedDB(): Promise<void> {
+    if (!this.indexedDB) return;
+    
+    try {
+      // Get all pool keys that start with this senseId
+      const allEntries = await this.indexedDB.getAllByPoolKey(`${this.senseId}_`);
+      
+      // Group by pool key
+      const poolKeyMap = new Map<string, Array<{ text: string; translation: string }>>();
+      for (const entry of allEntries) {
+        // Extract fingerprint and toLang from poolKey (format: senseId_fingerprint:toLang)
+        const poolKey = entry.poolKey;
+        const colonIndex = poolKey.indexOf(':');
+        if (colonIndex > 0) {
+          let poolData = poolKeyMap.get(poolKey);
+          if (!poolData) {
+            poolData = [];
+            poolKeyMap.set(poolKey, poolData);
+          }
+          poolData.push({ text: entry.text, translation: entry.translation });
+        }
+      }
+      
+      // Load each pool
+      for (const [poolKey, data] of poolKeyMap) {
+        let pool = this.pools.get(poolKey);
+        if (!pool) {
+          pool = new Map();
+          this.pools.set(poolKey, pool);
+        }
+        data.forEach(({ text, translation }) => {
+          pool?.set(text, translation);
+        });
+        this.loadedCombinations.add(poolKey);
+      }
+      
+      console.log(`[TranslationPool] Loaded ${allEntries.length} translations from IndexedDB`);
+    } catch (e) {
+      console.warn('Failed to load translation cache from IndexedDB:', e);
+    }
+  }
+
   loadLanguageFromStorage(fingerprint: string, toLang: string): void {
     const poolKey = this.getPoolKey(fingerprint, toLang);
+    
+    // If IndexedDB is enabled, use it instead of localStorage
+    if (this.useIndexedDB && this.indexedDB) {
+      this.loadLanguageFromIndexedDB(fingerprint, toLang);
+      return;
+    }
+    
     const storageKey = this.getStorageKey(fingerprint, toLang);
     try {
       const stored = localStorage.getItem(storageKey);
@@ -391,11 +482,45 @@ class TranslationPool {
     }
   }
 
+  /**
+   * Load translations for a specific fingerprint and language from IndexedDB
+   */
+  async loadLanguageFromIndexedDB(fingerprint: string, toLang: string): Promise<void> {
+    if (!this.indexedDB) return;
+    
+    const poolKey = this.getPoolKey(fingerprint, toLang);
+    const dbPoolKey = `${this.senseId}_${poolKey}`;
+    
+    try {
+      const entries = await this.indexedDB.getAllByPoolKey(dbPoolKey);
+      
+      if (entries.length > 0) {
+        let pool = this.pools.get(poolKey);
+        if (!pool) {
+          pool = new Map();
+          this.pools.set(poolKey, pool);
+        }
+        entries.forEach(entry => {
+          pool?.set(entry.text, entry.translation);
+        });
+        this.loadedCombinations.add(poolKey);
+      }
+    } catch (e) {
+      console.warn('Failed to load translation cache from IndexedDB:', e);
+    }
+  }
+
   getStorageKey(fingerprint: string, toLang: string): string {
     return `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_${fingerprint}:${toLang}`;
   }
 
   saveToStorage(fingerprint: string, toLang: string): void {
+    // If IndexedDB is enabled, save to IndexedDB instead of localStorage
+    if (this.useIndexedDB && this.indexedDB) {
+      this.saveToIndexedDB(fingerprint, toLang);
+      return;
+    }
+    
     if (typeof localStorage === 'undefined' || !this.crossTabOptions.enabled) {
       return;
     }
@@ -412,6 +537,41 @@ class TranslationPool {
       localStorage.setItem(storageKey, JSON.stringify(data));
     } catch (e) {
       console.warn('Failed to save translation cache to localStorage:', e);
+    }
+  }
+
+  /**
+   * Save translations to IndexedDB
+   */
+  async saveToIndexedDB(fingerprint: string, toLang: string): Promise<void> {
+    if (!this.indexedDB) return;
+    
+    const poolKey = this.getPoolKey(fingerprint, toLang);
+    const dbPoolKey = `${this.senseId}_${poolKey}`;
+    const pool = this.pools.get(poolKey);
+    
+    if (!pool || pool.size === 0) return;
+    
+    try {
+      // First delete existing entries for this pool
+      await this.indexedDB.deleteAllByPoolKey(dbPoolKey);
+      
+      // Then save all new entries
+      const entries = Array.from(pool.entries()).map(([text, translation]) => ({
+        id: `${dbPoolKey}:${text}`,
+        poolKey: dbPoolKey,
+        text,
+        translation,
+        dstLang: toLang,
+        timestamp: Date.now(),
+        // Default expiration: 32 hours (matching backend Redis cache)
+        expiresAt: Date.now() + 32 * 60 * 60 * 1000,
+      }));
+      
+      await this.indexedDB.setMany(entries);
+      console.log(`[TranslationPool] Saved ${entries.length} translations to IndexedDB for ${poolKey}`);
+    } catch (e) {
+      console.warn('Failed to save translation cache to IndexedDB:', e);
     }
   }
 
@@ -571,77 +731,88 @@ class TranslationPool {
     let successCount = cachedCount;
     let failCount = 0;
 
-    // Get the common target language from the first request (they all should be same during init)
-    const firstReq = uncachedRequests[0];
-    const commonToLang = firstReq.toLang;
-    const commonFingerprint = firstReq.fingerprint || this.currentFingerprint || 'common';
+    // Group uncached requests by target language (toLang) to ensure each request carries correct language
+    // This prevents "data mixing" issues when requests have different target languages
+    const requestsByLang: Map<string, PendingRequest[]> = new Map();
+    for (const req of uncachedRequests) {
+      const lang = req.toLang || 'en'; // Default to 'en' if not specified
+      if (!requestsByLang.has(lang)) {
+        requestsByLang.set(lang, []);
+      }
+      requestsByLang.get(lang)!.push(req);
+    }
 
-    try {
-      // Use the client to do a batch translate stream - all requests in one HTTP connection
-      // This shows only ONE request in browser network panel
-      const stream = this.client.translateBatchUncached(
-        uncachedRequests.map(r => ({ text: r.text, fromLang: r.fromLang })),
-        commonToLang,
-        commonFingerprint
-      );
+    // Process each language group separately
+    for (const [toLang, langRequests] of requestsByLang) {
+      const commonFingerprint = langRequests[0].fingerprint || this.currentFingerprint || 'common';
 
-      for await (const response of stream) {
-        // Process each translation as it arrives
-        if (response.translation) {
-          for (const [text, translation] of Object.entries(response.translation)) {
-            // Find the original pending request
-            const pendingReq = uncachedRequests.find(r => r.text === text);
-            if (pendingReq) {
-              // Add to cache immediately
-              this.addTranslation(text, translation as string);
-              // Resolve the pending promise
-              const fullResponse = TranslateStreamResponse.fromJson({
-                originalText: text,
-                translation: { [text]: translation as string },
-                timestamp: Date.now(),
-                finished: response.finished && Object.keys(response.translation).length === 0,
-                batchIndex: response.batchIndex || 0,
-              });
-              pendingReq.resolveFunction(fullResponse);
-              const key = `${text}-${pendingReq.fingerprint || 'common'}`;
-              delete this.pendingResolutions[key];
-              if (this.onTranslationUpdated) {
-                this.onTranslationUpdated(text, translation as string);
+      try {
+        // Use the client to do a batch translate stream - all requests in one HTTP connection
+        // This shows only ONE request in browser network panel per language group
+        const stream = this.client.translateBatchUncached(
+          langRequests.map(r => ({ text: r.text, fromLang: r.fromLang })),
+          toLang,
+          commonFingerprint
+        );
+
+        for await (const response of stream) {
+          // Process each translation as it arrives
+          if (response.translation) {
+            for (const [text, translation] of Object.entries(response.translation)) {
+              // Find the original pending request (must match both text AND language)
+              const pendingReq = langRequests.find(r => r.text === text && r.toLang === toLang);
+              if (pendingReq) {
+                // Add to cache immediately (with correct language)
+                this.addTranslation(text, translation as string, toLang);
+                // Resolve the pending promise
+                const fullResponse = TranslateStreamResponse.fromJson({
+                  originalText: text,
+                  translation: { [text]: translation as string },
+                  timestamp: Date.now(),
+                  finished: response.finished && Object.keys(response.translation).length === 0,
+                  batchIndex: response.batchIndex || 0,
+                });
+                pendingReq.resolveFunction(fullResponse);
+                const key = `${text}-${pendingReq.fingerprint || 'common'}`;
+                delete this.pendingResolutions[key];
+                if (this.onTranslationUpdated) {
+                  this.onTranslationUpdated(text, translation as string);
+                }
+                successCount++;
               }
-              successCount++;
             }
           }
-        }
 
-        if (response.finished) {
-          break;
-        }
-      }
-
-      // Check for any pending requests that didn't get a response - they failed
-      for (const pendingReq of uncachedRequests) {
-        const key = `${pendingReq.text}-${pendingReq.fingerprint || 'common'}`;
-        if (this.pendingResolutions[key]) {
-          // Still pending, means no response from server - fail it
-          if (pendingReq.rejectFunction) {
-            const error = new Error(`No translation response received for: "${pendingReq.text}"`);
-            pendingReq.rejectFunction(error);
+          if (response.finished) {
+            break;
           }
-          delete this.pendingResolutions[key];
-          failCount++;
         }
-      }
 
-    } catch (error: unknown) {
-      console.error(`[TranslationPool] Batch request failed:`, (error as Error).message);
-      // If batch fails, fail all remaining requests
-      for (const pendingReq of uncachedRequests) {
-        const key = `${pendingReq.text}-${pendingReq.fingerprint || 'common'}`;
-        if (this.pendingResolutions[key] && pendingReq.rejectFunction) {
-          const error = new Error(`Batch translation failed for: "${pendingReq.text}"`);
-          pendingReq.rejectFunction(error);
-          delete this.pendingResolutions[key];
-          failCount++;
+        // Check for any pending requests in this language group that didn't get a response - they failed
+        for (const pendingReq of langRequests) {
+          const key = `${pendingReq.text}-${pendingReq.fingerprint || 'common'}`;
+          if (this.pendingResolutions[key]) {
+            // Still pending, means no response from server - fail it
+            if (pendingReq.rejectFunction) {
+              const error = new Error(`No translation response received for: "${pendingReq.text}" (${toLang})`);
+              pendingReq.rejectFunction(error);
+            }
+            delete this.pendingResolutions[key];
+            failCount++;
+          }
+        }
+
+      } catch (error: unknown) {
+        console.error(`[TranslationPool] Batch request failed for language ${toLang}:`, (error as Error).message);
+        // If batch fails, fail all remaining requests in this language group
+        for (const pendingReq of langRequests) {
+          const key = `${pendingReq.text}-${pendingReq.fingerprint || 'common'}`;
+          if (this.pendingResolutions[key] && pendingReq.rejectFunction) {
+            const error = new Error(`Batch translation failed for: "${pendingReq.text}" (${toLang})`);
+            pendingReq.rejectFunction(error);
+            delete this.pendingResolutions[key];
+            failCount++;
+          }
         }
       }
     }
@@ -859,17 +1030,17 @@ class TranslationPool {
     this.broadcastUpdate();
   }
 
-  addTranslation(text: string, translation: string): void {
+  addTranslation(text: string, translation: string, toLang?: string): void {
     const fp = this.currentFingerprint || 'common';
-    const toLang = this.currentToLang || 'en';
-    const poolKey = this.getPoolKey(fp, toLang);
+    const lang = toLang || this.currentToLang || 'en';
+    const poolKey = this.getPoolKey(fp, lang);
     let pool = this.pools.get(poolKey);
     if (!pool) {
       pool = new Map();
       this.pools.set(poolKey, pool);
     }
     pool.set(text, translation);
-    this.saveToStorage(fp, toLang);
+    this.saveToStorage(fp, lang);
     this.broadcastUpdate(text, translation);
   }
 
@@ -1219,6 +1390,29 @@ class TranslationPool {
     // Update fingerprint if provided
     if (fingerprint !== undefined && fingerprint !== this.currentFingerprint) {
       this.currentFingerprint = fingerprint;
+    }
+    
+    // Clear queued requests when switching language to prevent backend pressure
+    // from accumulated requests during multiple language switches
+    if (this.queuedRequests.length > 0) {
+      console.log(`[TranslationPool] Clearing ${this.queuedRequests.length} queued requests when switching language from ${oldLang} to ${newLang}`);
+      for (const req of this.queuedRequests) {
+        if (req.rejectFunction) {
+          req.rejectFunction(new Error(`Language switched from ${oldLang} to ${newLang}, request cancelled`));
+        }
+      }
+      this.queuedRequests = [];
+    }
+    
+    // Clear pending resolutions for any requests that were waiting
+    for (const key of Object.keys(this.pendingResolutions)) {
+      const pending = this.pendingResolutions[key];
+      if (pending.rejectList) {
+        for (const reject of pending.rejectList) {
+          reject(new Error(`Language switched from ${oldLang} to ${newLang}, request cancelled`));
+        }
+      }
+      delete this.pendingResolutions[key];
     }
     
     this.currentToLang = newLang;
