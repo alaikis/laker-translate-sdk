@@ -5205,13 +5205,25 @@ class TranslationPool {
                 const stream = this.client.translateBatchUncached(langRequests.map(r => ({ text: r.text, fromLang: r.fromLang })), toLang, commonFingerprint);
                 for await (const response of stream) {
                     // Process each translation as it arrives
+                    // Use dstLang from response if available (back-end may auto-correct the target language)
+                    const responseDstLang = response.dstLang;
+                    const targetLang = responseDstLang || toLang;
                     if (response.translation) {
                         for (const [text, translation] of Object.entries(response.translation)) {
-                            // Find the original pending request (must match both text AND language)
-                            const pendingReq = langRequests.find(r => r.text === text && r.toLang === toLang);
+                            // Find the original pending request - if response has dstLang, match using response language
+                            let pendingReq;
+                            if (responseDstLang) {
+                                // If response has its own language, find the exact match
+                                pendingReq = langRequests.find(r => r.text === text && r.toLang === responseDstLang);
+                            }
+                            else {
+                                // Fallback to matching with original request language
+                                pendingReq = langRequests.find(r => r.text === text && r.toLang === toLang);
+                            }
+                            // Even if we don't have a pending request (shouldn't happen), still add to cache with correct language
+                            // This ensures we always use the language from the response (back-end might auto-correct)
+                            this.addTranslation(text, translation, targetLang);
                             if (pendingReq) {
-                                // Add to cache immediately (with correct language)
-                                this.addTranslation(text, translation, toLang);
                                 // Resolve the pending promise
                                 const fullResponse = TranslateStreamResponse.fromJson({
                                     originalText: text,
@@ -5219,6 +5231,8 @@ class TranslationPool {
                                     timestamp: Date.now(),
                                     finished: response.finished && Object.keys(response.translation).length === 0,
                                     batchIndex: response.batchIndex || 0,
+                                    srcLang: response.srcLang,
+                                    dstLang: response.dstLang,
                                 });
                                 pendingReq.resolveFunction(fullResponse);
                                 const key = `${text}-${pendingReq.fingerprint || 'common'}`;
