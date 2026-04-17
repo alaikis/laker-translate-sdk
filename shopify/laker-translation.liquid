@@ -1,0 +1,146 @@
+{#
+/**
+ * Laker Translation Service for Shopify Themes
+ *
+ * Usage:
+ * 1. Add this snippet to your theme.liquid before </body>
+ * 2. Configure your settings in the theme settings schema
+ * 3. Automatic translation will work on all theme strings
+ */
+#}
+
+{% if settings.laker_translation_enabled %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Configuration from Shopify theme settings
+    const lakerConfig = {
+        baseUrl: '{{ settings.laker_translation_base_url | escape }}',
+        token: '{{ settings.laker_translation_token | escape }}',
+        senseId: '{{ settings.laker_translation_sense_id | escape }}',
+        sourceLanguage: '{{ settings.laker_translation_source_lang | default: "en" }}',
+        enabled: {{ settings.laker_translation_enabled | json }},
+    };
+
+    // Don't translate if target is already source language
+    const currentLanguage = '{{ shop.locale | slice: 0, 2 }}';
+    if (currentLanguage === lakerConfig.sourceLanguage || !lakerConfig.enabled) {
+        return;
+    }
+
+    // Initialize translation client
+    (function() {
+        // Load our SDK if not already loaded
+        if (window.LakerTranslationClient) {
+            initTranslation();
+            return;
+        }
+
+        // We expect the SDK to be available from npm or CDN
+        // For Shopify themes using npm, import this instead
+        const script = document.createElement('script');
+        script.src = lakerConfig.baseUrl + '/laker-translation-sdk.js';
+        script.onload = initTranslation;
+        script.onerror = function() {
+            console.warn('Failed to load Laker Translation SDK');
+        };
+        document.head.appendChild(script);
+    })();
+
+    function initTranslation() {
+        const client = new window.LakerTranslationClient(lakerConfig.baseUrl);
+        if (lakerConfig.token) {
+            client.setToken(lakerConfig.token);
+        }
+
+        const pool = client.createTranslationPool(lakerConfig.senseId);
+
+        // Initialize and translate all text nodes
+        pool.initialize().then(function() {
+            console.log('Laker Translation initialized');
+            translatePage(document.body, pool, lakerConfig.sourceLanguage, currentLanguage);
+        }).catch(function(err) {
+            console.error('Laker Translation initialization failed:', err);
+        });
+    }
+
+    function translatePage(element, pool, fromLang, toLang) {
+        const walker = document.createTreeWalker(
+            element,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode: function(node) {
+                    // Skip script, style, and already translated nodes
+                    const tag = node.parentElement.tagName.toLowerCase();
+                    if (tag === 'script' || tag === 'style' || tag === 'noscript') {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    // Skip empty text
+                    const text = node.textContent.trim();
+                    if (text.length === 0) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    // Skip short text less than 2 chars
+                    if (text.length < 2) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            }
+        );
+
+        let node;
+        const translations = [];
+
+        // Collect all text nodes and translate them
+        while (node = walker.nextNode()) {
+            const originalText = node.textContent.trim();
+            if (originalText.length === 0) continue;
+
+            const result = pool.lookup(originalText);
+            if (result.found) {
+                // Use cached translation immediately
+                node.textContent = node.textContent.replace(originalText, result.translation);
+            } else {
+                // Request translation and update when done
+                translations.push({
+                    node: node,
+                    original: originalText,
+                    promise: pool.requestTranslation(originalText, fromLang, toLang)
+                });
+            }
+        }
+
+        // Update DOM with async translations
+        translations.forEach(function(item) {
+            item.promise.then(function(response) {
+                if (response.translatedText) {
+                    item.node.textContent = item.node.textContent.replace(item.original, response.translatedText);
+                }
+            }).catch(function(err) {
+                console.error('Translation error for:', item.original, err);
+            });
+        });
+
+        // Watch for dynamically added content
+        const observer = new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+                if (mutation.addedNodes.length) {
+                    mutation.addedNodes.forEach(function(addedNode) {
+                        if (addedNode.nodeType === Node.ELEMENT_NODE) {
+                            setTimeout(function() {
+                                translatePage(addedNode, pool, fromLang, toLang);
+                            }, 100);
+                        }
+                    });
+                }
+            });
+        });
+
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    }
+});
+</script>
+{% endif %}

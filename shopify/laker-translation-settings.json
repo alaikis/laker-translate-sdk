@@ -1,0 +1,77 @@
+[
+	{
+		"type": "checkbox",
+		"id": "laker_translation_enabled",
+		"label": "Enable Laker Translation",
+		"default": false
+	},
+	{
+		"type": "url",
+		"id": "laker_translation_base_url",
+		"label": "API Base URL",
+		"info": "The base URL for your Laker Translation API endpoint",
+		"default": "https://api.hottol.com/laker/"
+	},
+	{
+		"type": "text",
+		"id": "laker_translation_token",
+		"label": "Authentication Token",
+		"info": "JWT token for authentication (if required)"
+	},
+	{
+		"type": "text",
+		"id": "laker_translation_sense_id",
+		"label": "Sense ID",
+		"info": "Unique identifier for your store translation sense",
+		"default": "shopify-store"
+	},
+	{
+		"type": "select",
+		"id": "laker_translation_source_lang",
+		"label": "Source Language",
+		"info": "The original language of your theme content",
+		"default": "en",
+		"options": [
+			{
+				"value": "en",
+				"label": "English"
+			},
+			{
+				"value": "zh",
+				"label": "Chinese"
+			},
+			{
+				"value": "es",
+				"label": "Spanish"
+			},
+			{
+				"value": "fr",
+				"label": "French"
+			},
+			{
+				"value": "de",
+				"label": "German"
+			},
+			{
+				"value": "it",
+				"label": "Italian"
+			},
+			{
+				"value": "pt",
+				"label": "Portuguese"
+			},
+			{
+				"value": "ru",
+				"label": "Russian"
+			},
+			{
+				"value": "ja",
+				"label": "Japanese"
+			},
+			{
+				"value": "ko",
+				"label": "Korean"
+			}
+		]
+	}
+]
