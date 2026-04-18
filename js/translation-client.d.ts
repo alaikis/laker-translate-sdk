@@ -101,6 +101,7 @@ declare class TranslationPool {
     onPoolInitialized: (() => void) | null;
     onQueueProcessed: ((count: number) => void) | null;
     onTranslationUpdated: ((text: string, translation: string) => void) | null;
+    onCompensationTranslate: ((missingTexts: string[], toLang: string) => void) | null;
     persistentStorage?: unknown;
     backgroundUpdateOptions: BackgroundUpdateOptions;
     backgroundUpdateTimer: ReturnType<typeof setInterval> | null;
@@ -120,13 +121,21 @@ declare class TranslationPool {
     setPoolInitializedCallback(callback: () => void): void;
     setQueueProcessedCallback(callback: (count: number) => void): void;
     setTranslationUpdatedCallback(callback: (text: string, translation: string) => void): void;
+    /**
+     * Set callback to receive compensation translation requests when language is switched
+     * After switching to a new language, the callback will be invoked with all texts that exist
+     * in the old language pools but are missing in the new language. The integrator should
+     * queue these texts for translation to ensure all visible text gets translated.
+     * @param callback Callback that receives the list of missing texts and the new target language
+     */
+    setCompensationTranslateCallback(callback: (missingTexts: string[], toLang: string) => void): void;
     initCrossTabSync(): void;
-    loadFromStorage(): void;
+    loadFromStorage(): Promise<void>;
     /**
      * Load translations from IndexedDB
      */
     loadFromIndexedDB(): Promise<void>;
-    loadLanguageFromStorage(fingerprint: string, toLang: string): void;
+    loadLanguageFromStorage(fingerprint: string, toLang: string): Promise<void>;
     /**
      * Load translations for a specific fingerprint and language from IndexedDB
      */
@@ -431,6 +440,14 @@ declare class TranslationClient {
      * @param callback Callback to invoke when translations are updated
      */
     onTranslationUpdated(callback: () => void): void;
+    /**
+     * Register callback for compensation translation when language is switched
+     * After switching to a new language, the callback will be invoked with all texts
+     * that are missing translations for the new language, so the integrator can
+     * queue them for translation to ensure all visible text gets translated
+     * @param callback Callback to invoke with missing texts list and new language
+     */
+    onCompensationTranslate(callback: (missingTexts: string[], toLang: string) => void): void;
     /**
      * Clear all cached translations for the current sense
      * Clears both in-memory cache and persistent storage

@@ -244,6 +244,7 @@ class TranslationPool {
   onPoolInitialized: (() => void) | null = null;
   onQueueProcessed: ((count: number) => void) | null = null;
   onTranslationUpdated: ((text: string, translation: string) => void) | null = null;
+  onCompensationTranslate: ((missingTexts: string[], toLang: string) => void) | null = null;
   persistentStorage?: unknown;
   backgroundUpdateOptions: BackgroundUpdateOptions;
   backgroundUpdateTimer: ReturnType<typeof setInterval> | null = null;
@@ -320,15 +321,20 @@ class TranslationPool {
         databaseName: `laker-translation-${senseId}`,
         storeName: 'translations',
       });
-      // Initialize the database asynchronously
-      this.indexedDB.init().catch(err => {
-        console.warn('[TranslationPool] Failed to initialize IndexedDB, falling back to localStorage:', err);
-        this.useIndexedDB = false;
-        this.indexedDB = null;
-      });
+      // Initialize the database and load cache asynchronously
+      this.indexedDB.init()
+        .then(() => this.loadFromStorage())
+        .catch(err => {
+          console.warn('[TranslationPool] Failed to initialize IndexedDB, falling back to localStorage:', err);
+          this.useIndexedDB = false;
+          this.indexedDB = null;
+          this.loadFromStorage();
+        });
+    } else {
+      // Load from localStorage synchronously
+      this.loadFromStorage();
     }
     
-    this.loadFromStorage();
     this.startBackgroundUpdateChecker();
   }
 
@@ -346,6 +352,17 @@ class TranslationPool {
 
   setTranslationUpdatedCallback(callback: (text: string, translation: string) => void): void {
     this.onTranslationUpdated = callback;
+  }
+
+  /**
+   * Set callback to receive compensation translation requests when language is switched
+   * After switching to a new language, the callback will be invoked with all texts that exist
+   * in the old language pools but are missing in the new language. The integrator should
+   * queue these texts for translation to ensure all visible text gets translated.
+   * @param callback Callback that receives the list of missing texts and the new target language
+   */
+  setCompensationTranslateCallback(callback: (missingTexts: string[], toLang: string) => void): void {
+    this.onCompensationTranslate = callback;
   }
 
   initCrossTabSync(): void {
@@ -382,10 +399,10 @@ class TranslationPool {
     });
   }
 
-  loadFromStorage(): void {
+  async loadFromStorage(): Promise<void> {
     // If IndexedDB is enabled, load from IndexedDB instead of localStorage
     if (this.useIndexedDB && this.indexedDB) {
-      this.loadFromIndexedDB();
+      await this.loadFromIndexedDB();
       return;
     }
     
@@ -393,6 +410,7 @@ class TranslationPool {
       return;
     }
     const prefix = `${this.crossTabOptions.storageKeyPrefix}${this.senseId}_`;
+    const loadPromises: Promise<void>[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
       if (key && key.startsWith(prefix) && key.includes(':')) {
@@ -402,10 +420,11 @@ class TranslationPool {
           const fingerprint = afterPrefix.substring(0, colonIndex);
           const toLang = afterPrefix.substring(colonIndex + 1);
           // Load all cached fingerprints from storage, not just common
-          this.loadLanguageFromStorage(fingerprint, toLang);
+          loadPromises.push(this.loadLanguageFromStorage(fingerprint, toLang));
         }
       }
     }
+    await Promise.all(loadPromises);
   }
 
   /**
@@ -453,12 +472,12 @@ class TranslationPool {
     }
   }
 
-  loadLanguageFromStorage(fingerprint: string, toLang: string): void {
+  async loadLanguageFromStorage(fingerprint: string, toLang: string): Promise<void> {
     const poolKey = this.getPoolKey(fingerprint, toLang);
     
     // If IndexedDB is enabled, use it instead of localStorage
     if (this.useIndexedDB && this.indexedDB) {
-      this.loadLanguageFromIndexedDB(fingerprint, toLang);
+      await this.loadLanguageFromIndexedDB(fingerprint, toLang);
       return;
     }
     
@@ -745,6 +764,10 @@ class TranslationPool {
     // Process each language group separately
     for (const [toLang, langRequests] of requestsByLang) {
       const commonFingerprint = langRequests[0].fingerprint || this.currentFingerprint || 'common';
+      // Capture the language version when this batch started
+      // If language version changes during streaming (language was switched),
+      // we need to stop processing this response to avoid cache corruption
+      const versionAtStart = this.currentLanguageVersion;
 
       try {
         // Use the client to do a batch translate stream - all requests in one HTTP connection
@@ -756,6 +779,14 @@ class TranslationPool {
         );
 
         for await (const response of stream) {
+          // If language version has changed, this response is from an old request
+          // Do NOT process it - the language has already switched, old requests were cancelled
+          // This prevents cache corruption and mixing data between different languages
+          if (this.currentLanguageVersion !== versionAtStart) {
+            console.log(`[TranslationPool] Language version changed from ${versionAtStart} to ${this.currentLanguageVersion} during batch processing - stopping old batch`);
+            break;
+          }
+          
           // Process each translation as it arrives
           // Use dstLang from response if available (back-end may auto-correct the target language)
           const responseDstLang = response.dstLang;
@@ -876,20 +907,25 @@ class TranslationPool {
       console.log(`[TranslationPool] Already loading, skipping duplicate initialize`);
       return;
     }
+    
+    // Clear any pending requests from previous language to avoid backend pressure
+    this.clearQueuedRequests();
+    
     this.loading = true;
     this.currentToLang = toLang;
     try {
       console.log(`[TranslationPool] Starting pool initialization... (toLang: ${toLang})`);
       
-      // First try to load from localStorage (browser cache)
-      this.loadLanguageFromStorage('common', toLang);
+      // First try to load from persistent storage (localStorage / IndexedDB) for new language
+      // This ensures we have the cached translations for the new language before processing requests
+      await this.loadLanguageFromStorage('common', toLang);
       const commonPoolKey = this.getPoolKey('common', toLang);
       const commonPool = this.pools.get(commonPoolKey);
       let hasLocalCache = commonPool && commonPool.size > 0;
       
-      // If we have a current fingerprint, also load it from localStorage first
+      // If we have a current fingerprint, also load it from storage for the new language
       if (this.currentFingerprint) {
-        this.loadLanguageFromStorage(this.currentFingerprint, toLang);
+        await this.loadLanguageFromStorage(this.currentFingerprint, toLang);
         const fpPoolKey = this.getPoolKey(this.currentFingerprint, toLang);
         const fpPool = this.pools.get(fpPoolKey);
         if (fpPool && fpPool.size > 0) {
@@ -897,15 +933,45 @@ class TranslationPool {
         }
       }
       
-      if (hasLocalCache) {
-        console.log(`[TranslationPool] Using existing translations from localStorage cache (no server fetch needed)`);
-        this.loadedCombinations.add(commonPoolKey);
-        if (this.currentFingerprint) {
-          const fpPoolKey = this.getPoolKey(this.currentFingerprint, toLang);
-          this.loadedCombinations.add(fpPoolKey);
+      // Mark combinations as loaded
+      this.loadedCombinations.add(commonPoolKey);
+      if (this.currentFingerprint) {
+        const fpPoolKey = this.getPoolKey(this.currentFingerprint, toLang);
+        this.loadedCombinations.add(fpPoolKey);
+      }
+
+      // Count total entries in new language
+      let newLangTotal = commonPool?.size || 0;
+      if (this.currentFingerprint) {
+        const fpPoolKey = this.getPoolKey(this.currentFingerprint, toLang);
+        const fpPool = this.pools.get(fpPoolKey);
+        if (fpPool) {
+          newLangTotal += fpPool.size;
         }
+      }
+
+      // Count total entries from all languages (previous languages)
+      // If we have significantly fewer entries in the new language, we need to sync from server
+      // because the backend may have already completed background auto-translation for the new language
+      let allLangsTotal = 0;
+      for (const [poolKey, pool] of this.pools.entries()) {
+        if (!poolKey.endsWith(`:${toLang}`)) {
+          allLangsTotal += pool.size;
+        }
+      }
+
+      // If hasLocalCache is true but we have many more entries in other languages,
+      // it means the new language was auto-translated on the server and we need to sync
+      // or local cache is incomplete - force a server fetch to get all available translations
+      const shouldForceServerSync = hasLocalCache && allLangsTotal > 0 && newLangTotal < allLangsTotal * 0.5;
+
+      if (hasLocalCache && !shouldForceServerSync) {
+        console.log(`[TranslationPool] Using existing translations from local cache (no server fetch needed), loaded ${commonPool?.size || 0} common + ${this.currentFingerprint && this.pools.get(this.getPoolKey(this.currentFingerprint, toLang))?.size || 0} fingerprint entries`);
       } else {
-        console.log(`[TranslationPool] No local cache found, loading all translations from server for cache synchronization`);
+        if (shouldForceServerSync) {
+          console.log(`[TranslationPool] Local cache has only ${newLangTotal} entries but ${allLangsTotal} exist in other languages - forcing server sync to get auto-translated results`);
+        }
+        console.log(`Loading all translations from server for ${toLang} for cache synchronization`);
         // No local cache available, need to load from server
         await this.loadFingerprintTranslations('common', undefined, toLang);
         console.log(`[TranslationPool] Common translations loaded for ${toLang}`);
@@ -921,6 +987,46 @@ class TranslationPool {
         this.onPoolInitialized();
       }
       await this.processQueuedRequests();
+
+      // Perform compensation translation: collect all existing texts from previous languages
+      // and check which ones are missing in the new language pool. If we have a registered
+      // callback, send the missing texts for translation to ensure all text gets translated.
+      if (this.onCompensationTranslate && this.pools.size > 0) {
+        // Collect all unique texts that exist in any pool for the previous language(s)
+        const allExistingTexts = new Set<string>();
+        // Collect all existing texts that are already cached in the new language
+        const existingInNewLang = new Set<string>();
+
+        // Iterate all pools to collect texts
+        for (const [poolKey, pool] of this.pools.entries()) {
+          if (poolKey.endsWith(`:${toLang}`)) {
+            // This pool is for the new language - add all texts to existingInNewLang
+            for (const text of pool.keys()) {
+              existingInNewLang.add(text);
+            }
+          } else {
+            // This pool is for an older language - add texts to allExistingTexts
+            for (const text of pool.keys()) {
+              allExistingTexts.add(text);
+            }
+          }
+        }
+
+        // Find the texts that exist in older pools but are missing in the new language
+        const missingTexts: string[] = [];
+        for (const text of allExistingTexts) {
+          if (!existingInNewLang.has(text)) {
+            missingTexts.push(text);
+          }
+        }
+
+        if (missingTexts.length > 0) {
+          console.log(`[TranslationPool] Found ${missingTexts.length} texts missing in new language ${toLang}, triggering compensation translation`);
+          this.onCompensationTranslate(missingTexts, toLang);
+        } else {
+          console.log(`[TranslationPool] No missing texts found in new language ${toLang}, no compensation needed`);
+        }
+      }
     } catch (error) {
       console.error(`[TranslationPool] Pool initialization failed for ${toLang}:`, error);
       throw error;
@@ -1435,6 +1541,13 @@ class TranslationPool {
     this.currentLanguageVersion++;
     console.log(`[TranslationPool] Changed current target language from ${oldLang} to: ${newLang}`);
     
+    // When switching language, stop the persistent stream because any old responses
+    // would be for the wrong language and cause cache corruption
+    if (this.client.isPersistentStreamConnected()) {
+      console.log('[TranslationPool] Language changed, stopping persistent stream to prevent cache corruption');
+      this.client.stopPersistentStream();
+    }
+    
     // Full initialize for the new language - this properly loads both common and current fingerprint
     // The existing initialize method already has the correct logic
     await this.initialize(newLang);
@@ -1749,9 +1862,10 @@ class TranslationClient {
      const actualFingerprint = fingerprint ?? this.pool.getCurrentFingerprint() ?? 'common';
      
      // Check if the target language has changed from current, auto-switch
+     // If currentLang is null (page refresh with language in URL), always initialize
      const currentLang = this.pool.getCurrentLanguage();
-     if (currentLang !== toLang) {
-       // Language changed, auto-load the new language for the current fingerprint
+     if (currentLang === null || currentLang !== toLang) {
+       // Language changed (or first load after page refresh), auto-load the new language for the current fingerprint
        console.log(`[TranslationClient] Language changed from ${currentLang} to ${toLang}, auto-loading translation pool`);
        await this.pool.setCurrentLanguage(toLang, actualFingerprint);
      }
@@ -2042,7 +2156,20 @@ class TranslationClient {
     // Start the reader in the background that continuously processes responses
     this.persistentStreamReader = async () => {
       try {
+        // Capture the language version when the reader started
+        // If language version changes, stop reading to prevent cache corruption
+        const versionAtStart = this.pool.currentLanguageVersion;
+        
         for await (const response of this.persistentStream!) {
+          // If language version has changed, this is an old stream from previous language
+          // Stop reading immediately - all pending requests were already rejected
+          // This prevents cache corruption where old responses get added to new language cache
+          if (this.pool.currentLanguageVersion !== versionAtStart) {
+            console.log(`[TranslationClient] Language version changed from ${versionAtStart} to ${this.pool.currentLanguageVersion} during persistent streaming - stopping old stream`);
+            this.stopPersistentStream();
+            break;
+          }
+          
           // Check if this response matches a pending request by requestId
           const resp = response as any;
           if (resp.requestId) {
@@ -2192,6 +2319,17 @@ class TranslationClient {
    */
   onTranslationUpdated(callback: () => void): void {
     this.pool.setTranslationUpdatedCallback(callback);
+  }
+
+  /**
+   * Register callback for compensation translation when language is switched
+   * After switching to a new language, the callback will be invoked with all texts
+   * that are missing translations for the new language, so the integrator can
+   * queue them for translation to ensure all visible text gets translated
+   * @param callback Callback to invoke with missing texts list and new language
+   */
+  onCompensationTranslate(callback: (missingTexts: string[], toLang: string) => void): void {
+    this.pool.setCompensationTranslateCallback(callback);
   }
 
   /**
