@@ -6633,24 +6633,32 @@ var LakerTranslation = (function (exports) {
                 // Count total entries from all languages (previous languages)
                 // If we have significantly fewer entries in the new language, we need to sync from server
                 // because the backend may have already completed background auto-translation for the new language
-                let allLangsTotal = 0;
+                // Correction: We only compare against the largest existing language pool, not all languages combined
+                // Because when switching from multiple languages to a new one, total of all languages will always be larger
+                let maxOtherLangSize = 0;
                 for (const [poolKey, pool] of this.pools.entries()) {
                     if (!poolKey.endsWith(`:${toLang}`)) {
-                        allLangsTotal += pool.size;
+                        if (pool.size > maxOtherLangSize) {
+                            maxOtherLangSize = pool.size;
+                        }
                     }
                 }
-                // If hasLocalCache is true but we have many more entries in other languages,
+                // If hasLocalCache is true but we have significantly fewer entries in the new language compared to
+                // the largest existing language pool (which is what we expect from the original source language),
                 // it means the new language was auto-translated on the server and we need to sync
                 // or local cache is incomplete - force a server fetch to get all available translations
-                const shouldForceServerSync = hasLocalCache && allLangsTotal > 0 && newLangTotal < allLangsTotal * 0.5;
+                // Only trigger force sync if we have less than 50% of the max other language size
+                const shouldForceServerSync = hasLocalCache && maxOtherLangSize > 0 && newLangTotal < maxOtherLangSize * 0.5;
                 if (hasLocalCache && !shouldForceServerSync) {
                     console.log(`[TranslationPool] Using existing translations from local cache (no server fetch needed), loaded ${commonPool?.size || 0} common + ${this.currentFingerprint && this.pools.get(this.getPoolKey(this.currentFingerprint, toLang))?.size || 0} fingerprint entries`);
                 }
                 else {
                     if (shouldForceServerSync) {
-                        console.log(`[TranslationPool] Local cache has only ${newLangTotal} entries but ${allLangsTotal} exist in other languages - forcing server sync to get auto-translated results`);
+                        console.log(`[TranslationPool] Local cache has only ${newLangTotal} entries but largest other language has ${maxOtherLangSize} - forcing server sync to get auto-translated results`);
                     }
-                    console.log(`Loading all translations from server for ${toLang} for cache synchronization`);
+                    else {
+                        console.log(`Loading all translations from server for ${toLang} for cache synchronization (no local cache found)`);
+                    }
                     // No local cache available, need to load from server
                     await this.loadFingerprintTranslations('common', undefined, toLang);
                     console.log(`[TranslationPool] Common translations loaded for ${toLang}`);

@@ -1,6 +1,0 @@
-node_modules/
-src/
-*.ts
-!*.d.ts
-rollup.config.js
-tsconfig.json
