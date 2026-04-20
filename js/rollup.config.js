@@ -42,9 +42,9 @@ const browserConfig = {
 const mainConfig = {
   input: 'translation-client.ts',
   external: [
+    /^@bufbuild\//,
+    /^@connectrpc\//,
     /^broadcast-channel/,
-    /^@connectrpc\/connect-node/,
-    /^@connectrpc\/connect-web/,
     /^assert$/,
     /^net$/,
     /^http$/,
