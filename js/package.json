@@ -1,6 +1,6 @@
 {
   "name": "@alaikis/translation-sdk",
-  "version": "1.6.146",
+  "version": "1.6.147",
   "description": "Translation Service Connect RPC JavaScript/TypeScript SDK",
   "type": "module",
   "main": "translation-client.cjs",
@@ -52,6 +52,7 @@
   },
   "homepage": "https://github.com/alaikis/laker-translate-sdk#readme",
   "devDependencies": {
+    "@bufbuild/buf": "^1.68.3",
     "@bufbuild/protobuf": "^1.10.0",
     "@bufbuild/protoc-gen-es": "^1.10.0",
     "@connectrpc/protoc-gen-connect-es": "^1.7.0",
@@ -70,7 +71,6 @@
     "typescript": "^5.7.3"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^1.10.0",
     "@connectrpc/connect": "^1.7.0",
     "@connectrpc/connect-node": "^1.7.0",
     "@connectrpc/connect-web": "^1.7.0",

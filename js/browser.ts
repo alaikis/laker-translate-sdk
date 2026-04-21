@@ -17,8 +17,8 @@ import {
   TranslateStreamRequest,
   TranslateStreamResponse,
   TranslateRecord,
-} from './gen/translation_pb';
-import { TranslationService } from './gen/translation_connect';
+} from './gen/proto/proto/translation_pb';
+import { TranslationService } from './gen/proto/proto/translation_connect';
 import * as translationClient from './translation-client';
 
 // Export generated types
@@ -32,7 +32,7 @@ export type {
 
 // Export everything from translation-client
 export * from './translation-client';
-export { TranslationService } from './gen/translation_connect';
+export { TranslationService } from './gen/proto/proto/translation_connect';
 
 // Explicitly ensure all exports are available on window.LakerTranslation
 // This guarantees that even if Rollup IIFE doesn't work, we still have the exports
@@ -43,4 +43,8 @@ if (typeof window !== 'undefined') {
   // Copy all exports to window
   Object.assign((window as any).LakerTranslation, translationClient);
   (window as any).LakerTranslation.TranslationService = TranslationService;
+  // Also add alias for backward compatibility
+  if (!(window as any).alaikisTranslation) {
+    (window as any).alaikisTranslation = (window as any).LakerTranslation;
+  }
 }

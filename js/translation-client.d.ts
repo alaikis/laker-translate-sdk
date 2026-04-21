@@ -9,7 +9,7 @@
  * Supports true multiplexing on a single connection
  * Supports both web browsers and Node.js
  */
-import { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord } from './gen/translation_pb';
+import { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord } from './gen/proto/proto/translation_pb';
 import type { Transport } from '@connectrpc/connect';
 import { TranslationIndexedDB } from './indexeddb';
 export type { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse, TranslateRecord, };
