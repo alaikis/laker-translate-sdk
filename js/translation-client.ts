@@ -2030,6 +2030,10 @@ class TranslationClient {
        dst_lang: toLang,
        fingerprint,
        persistent: false,
+       texts: texts.map(t => ({
+         text: t.text,
+         from_lang: t.fromLang,
+       })),
      });
      const stream = this.client.translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
      return stream;

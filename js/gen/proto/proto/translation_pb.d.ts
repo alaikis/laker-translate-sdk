@@ -135,6 +135,31 @@ export type GetSenseTranslateResponse = Message<"translation.GetSenseTranslateRe
  */
 export declare const GetSenseTranslateResponseSchema: GenMessage<GetSenseTranslateResponse>;
 /**
+ * TextRequest 单个文本翻译请求
+ * 用于批量翻译未缓存文本场景
+ *
+ * @generated from message translation.TextRequest
+ */
+export type TextRequest = Message<"translation.TextRequest"> & {
+    /**
+     * 要翻译的原文
+     *
+     * @generated from field: string text = 1;
+     */
+    text: string;
+    /**
+     * 源语言，可选，如果未提供使用默认
+     *
+     * @generated from field: optional string from_lang = 2;
+     */
+    fromLang?: string;
+};
+/**
+ * Describes the message translation.TextRequest.
+ * Use `create(TextRequestSchema)` to create a new message.
+ */
+export declare const TextRequestSchema: GenMessage<TextRequest>;
+/**
  * TranslateStreamRequest 流式翻译请求
  *
  * @generated from message translation.TranslateStreamRequest
@@ -210,6 +235,13 @@ export type TranslateStreamRequest = Message<"translation.TranslateStreamRequest
      * @generated from field: optional string corrected_translation = 11;
      */
     correctedTranslation?: string;
+    /**
+     * 批量翻译未缓存文本列表
+     * JS SDK 批量翻译未命中缓存的文本时使用
+     *
+     * @generated from field: repeated translation.TextRequest texts = 12;
+     */
+    texts: TextRequest[];
 };
 /**
  * Describes the message translation.TranslateStreamRequest.
@@ -282,6 +314,78 @@ export type TranslateStreamResponse = Message<"translation.TranslateStreamRespon
  */
 export declare const TranslateStreamResponseSchema: GenMessage<TranslateStreamResponse>;
 /**
+ * LLMTranslateRequest 大模型翻译请求
+ *
+ * @generated from message translation.LLMTranslateRequest
+ */
+export type LLMTranslateRequest = Message<"translation.LLMTranslateRequest"> & {
+    /**
+     * 要翻译的原文
+     *
+     * @generated from field: string text = 1;
+     */
+    text: string;
+    /**
+     * 源语言
+     *
+     * @generated from field: string from_lang = 2;
+     */
+    fromLang: string;
+    /**
+     * 目标语言
+     *
+     * @generated from field: string to_lang = 3;
+     */
+    toLang: string;
+    /**
+     * 语义sense ID，可选
+     *
+     * @generated from field: string sense_id = 4;
+     */
+    senseId: string;
+    /**
+     * 用户指纹，可选
+     *
+     * @generated from field: string fingerprint = 5;
+     */
+    fingerprint: string;
+};
+/**
+ * Describes the message translation.LLMTranslateRequest.
+ * Use `create(LLMTranslateRequestSchema)` to create a new message.
+ */
+export declare const LLMTranslateRequestSchema: GenMessage<LLMTranslateRequest>;
+/**
+ * LLMTranslateResponse 大模型翻译响应
+ *
+ * @generated from message translation.LLMTranslateResponse
+ */
+export type LLMTranslateResponse = Message<"translation.LLMTranslateResponse"> & {
+    /**
+     * 翻译结果
+     *
+     * @generated from field: string translation = 1;
+     */
+    translation: string;
+    /**
+     * 源语言
+     *
+     * @generated from field: string from_lang = 2;
+     */
+    fromLang: string;
+    /**
+     * 目标语言
+     *
+     * @generated from field: string to_lang = 3;
+     */
+    toLang: string;
+};
+/**
+ * Describes the message translation.LLMTranslateResponse.
+ * Use `create(LLMTranslateResponseSchema)` to create a new message.
+ */
+export declare const LLMTranslateResponseSchema: GenMessage<LLMTranslateResponse>;
+/**
  * TranslationService 翻译服务
  * 提供统一的翻译查询接口，支持普通查询和流式推送
  *
@@ -310,5 +414,39 @@ export declare const TranslationService: GenService<{
         methodKind: "server_streaming";
         input: typeof TranslateStreamRequestSchema;
         output: typeof TranslateStreamResponseSchema;
+    };
+    /**
+     * TranslateBidirectional 双向流式翻译
+     * 客户端可以持续发送多个查询请求，服务端持续推送结果
+     * 适合交互式翻译场景
+     *
+     * @generated from rpc translation.TranslationService.TranslateBidirectional
+     */
+    translateBidirectional: {
+        methodKind: "bidi_streaming";
+        input: typeof TranslateStreamRequestSchema;
+        output: typeof TranslateStreamResponseSchema;
+    };
+    /**
+     * LLMTranslate 大模型翻译（一元RPC）
+     * 使用配置的大模型翻译provider进行实时翻译
+     *
+     * @generated from rpc translation.TranslationService.LLMTranslate
+     */
+    lLMTranslate: {
+        methodKind: "unary";
+        input: typeof LLMTranslateRequestSchema;
+        output: typeof LLMTranslateResponseSchema;
+    };
+    /**
+     * LLMTranslateStream 大模型流式翻译
+     * 使用配置的大模型翻译provider进行实时翻译，流式推送结果
+     *
+     * @generated from rpc translation.TranslationService.LLMTranslateStream
+     */
+    lLMTranslateStream: {
+        methodKind: "server_streaming";
+        input: typeof LLMTranslateRequestSchema;
+        output: typeof LLMTranslateResponseSchema;
     };
 }>;

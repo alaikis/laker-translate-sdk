@@ -11,7 +11,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file proto/translation.proto.
  */
 export const file_proto_translation: GenFile = /*@__PURE__*/
-  fileDesc("Chdwcm90by90cmFuc2xhdGlvbi5wcm90bxILdHJhbnNsYXRpb24imwEKGEdldFNlbnNlVHJhbnNsYXRlUmVxdWVzdBIQCghzZW5zZV9pZBgBIAEoCRIYCgtmaW5nZXJwcmludBgCIAEoCUgAiAEBEgwKBHBhZ2UYAyABKAUSEQoJcGFnZV9zaXplGAQgASgFEhEKCWZyb21fbGFuZxgFIAEoCRIPCgd0b19sYW5nGAYgASgJQg4KDF9maW5nZXJwcmludCIyCg9UcmFuc2xhdGVSZWNvcmQSDAoEdGV4dBgBIAEoCRIRCgl0cmFuc2xhdGUYAiABKAki4AIKGUdldFNlbnNlVHJhbnNsYXRlUmVzcG9uc2USQgoGY29tbW9uGAEgAygLMjIudHJhbnNsYXRpb24uR2V0U2Vuc2VUcmFuc2xhdGVSZXNwb25zZS5Db21tb25FbnRyeRJECgdzcGVjaWFsGAIgAygLMjMudHJhbnNsYXRpb24uR2V0U2Vuc2VUcmFuc2xhdGVSZXNwb25zZS5TcGVjaWFsRW50cnkSDAoEcGFnZRgDIAEoBRIRCglwYWdlX3NpemUYBCABKAUSDQoFdG90YWwYBSABKAMSEwoLdG90YWxfcGFnZXMYBiABKAMSFQoNc3BlY2lhbF90b3RhbBgHIAEoAxotCgtDb21tb25FbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGi4KDFNwZWNpYWxFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBItECChZUcmFuc2xhdGVTdHJlYW1SZXF1ZXN0EgwKBHRleHQYASABKAkSEAoIc2Vuc2VfaWQYAiABKAkSEwoLZmluZ2VycHJpbnQYAyABKAkSEQoJZnJvbV9sYW5nGAQgASgJEg8KB3RvX2xhbmcYBSABKAkSEAoIc3JjX2xhbmcYBiABKAkSEAoIZHN0X2xhbmcYByABKAkSFwoKcmVxdWVzdF9pZBgIIAEoCUgAiAEBEhcKCnBlcnNpc3RlbnQYCSABKAhIAYgBARIaCg1pc19jb3JyZWN0aW9uGAogASgISAKIAQESIgoVY29ycmVjdGVkX3RyYW5zbGF0aW9uGAsgASgJSAOIAQFCDQoLX3JlcXVlc3RfaWRCDQoLX3BlcnNpc3RlbnRCEAoOX2lzX2NvcnJlY3Rpb25CGAoWX2NvcnJlY3RlZF90cmFuc2xhdGlvbiLaAgoXVHJhbnNsYXRlU3RyZWFtUmVzcG9uc2USFQoNb3JpZ2luYWxfdGV4dBgBIAEoCRJKCgt0cmFuc2xhdGlvbhgCIAMoCzI1LnRyYW5zbGF0aW9uLlRyYW5zbGF0ZVN0cmVhbVJlc3BvbnNlLlRyYW5zbGF0aW9uRW50cnkSEQoJdGltZXN0YW1wGAMgASgDEhAKCGZpbmlzaGVkGAQgASgIEhMKC2JhdGNoX2luZGV4GAUgASgFEhcKCnJlcXVlc3RfaWQYBiABKAlIAIgBARIVCghzcmNfbGFuZxgHIAEoCUgBiAEBEhUKCGRzdF9sYW5nGAggASgJSAKIAQEaMgoQVHJhbnNsYXRpb25FbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBQg0KC19yZXF1ZXN0X2lkQgsKCV9zcmNfbGFuZ0ILCglfZHN0X2xhbmcyhQIKElRyYW5zbGF0aW9uU2VydmljZRKMAQoRR2V0U2Vuc2VUcmFuc2xhdGUSJS50cmFuc2xhdGlvbi5HZXRTZW5zZVRyYW5zbGF0ZVJlcXVlc3QaJi50cmFuc2xhdGlvbi5HZXRTZW5zZVRyYW5zbGF0ZVJlc3BvbnNlIiiC0+STAiISIC92MS90cmFuc2xhdGlvbi9zZW5zZS97c2Vuc2VfaWR9EmAKD1RyYW5zbGF0ZVN0cmVhbRIjLnRyYW5zbGF0aW9uLlRyYW5zbGF0ZVN0cmVhbVJlcXVlc3QaJC50cmFuc2xhdGlvbi5UcmFuc2xhdGVTdHJlYW1SZXNwb25zZSIAMAFCNFoyYXBpLmxha2VyLmRldi9wcm90by9nZW4vZ28vdHJhbnNsYXRpb247dHJhbnNsYXRpb25iBnByb3RvMw", [file_google_api_annotations]);
+  fileDesc("Chdwcm90by90cmFuc2xhdGlvbi5wcm90bxILdHJhbnNsYXRpb24imwEKGEdldFNlbnNlVHJhbnNsYXRlUmVxdWVzdBIQCghzZW5zZV9pZBgBIAEoCRIYCgtmaW5nZXJwcmludBgCIAEoCUgAiAEBEgwKBHBhZ2UYAyABKAUSEQoJcGFnZV9zaXplGAQgASgFEhEKCWZyb21fbGFuZxgFIAEoCRIPCgd0b19sYW5nGAYgASgJQg4KDF9maW5nZXJwcmludCIyCg9UcmFuc2xhdGVSZWNvcmQSDAoEdGV4dBgBIAEoCRIRCgl0cmFuc2xhdGUYAiABKAki4AIKGUdldFNlbnNlVHJhbnNsYXRlUmVzcG9uc2USQgoGY29tbW9uGAEgAygLMjIudHJhbnNsYXRpb24uR2V0U2Vuc2VUcmFuc2xhdGVSZXNwb25zZS5Db21tb25FbnRyeRJECgdzcGVjaWFsGAIgAygLMjMudHJhbnNsYXRpb24uR2V0U2Vuc2VUcmFuc2xhdGVSZXNwb25zZS5TcGVjaWFsRW50cnkSDAoEcGFnZRgDIAEoBRIRCglwYWdlX3NpemUYBCABKAUSDQoFdG90YWwYBSABKAMSEwoLdG90YWxfcGFnZXMYBiABKAMSFQoNc3BlY2lhbF90b3RhbBgHIAEoAxotCgtDb21tb25FbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGi4KDFNwZWNpYWxFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIkEKC1RleHRSZXF1ZXN0EgwKBHRleHQYASABKAkSFgoJZnJvbV9sYW5nGAIgASgJSACIAQFCDAoKX2Zyb21fbGFuZyL6AgoWVHJhbnNsYXRlU3RyZWFtUmVxdWVzdBIMCgR0ZXh0GAEgASgJEhAKCHNlbnNlX2lkGAIgASgJEhMKC2ZpbmdlcnByaW50GAMgASgJEhEKCWZyb21fbGFuZxgEIAEoCRIPCgd0b19sYW5nGAUgASgJEhAKCHNyY19sYW5nGAYgASgJEhAKCGRzdF9sYW5nGAcgASgJEhcKCnJlcXVlc3RfaWQYCCABKAlIAIgBARIXCgpwZXJzaXN0ZW50GAkgASgISAGIAQESGgoNaXNfY29ycmVjdGlvbhgKIAEoCEgCiAEBEiIKFWNvcnJlY3RlZF90cmFuc2xhdGlvbhgLIAEoCUgDiAEBEicKBXRleHRzGAwgAygLMhgudHJhbnNsYXRpb24uVGV4dFJlcXVlc3RCDQoLX3JlcXVlc3RfaWRCDQoLX3BlcnNpc3RlbnRCEAoOX2lzX2NvcnJlY3Rpb25CGAoWX2NvcnJlY3RlZF90cmFuc2xhdGlvbiLaAgoXVHJhbnNsYXRlU3RyZWFtUmVzcG9uc2USFQoNb3JpZ2luYWxfdGV4dBgBIAEoCRJKCgt0cmFuc2xhdGlvbhgCIAMoCzI1LnRyYW5zbGF0aW9uLlRyYW5zbGF0ZVN0cmVhbVJlc3BvbnNlLlRyYW5zbGF0aW9uRW50cnkSEQoJdGltZXN0YW1wGAMgASgDEhAKCGZpbmlzaGVkGAQgASgIEhMKC2JhdGNoX2luZGV4GAUgASgFEhcKCnJlcXVlc3RfaWQYBiABKAlIAIgBARIVCghzcmNfbGFuZxgHIAEoCUgBiAEBEhUKCGRzdF9sYW5nGAggASgJSAKIAQEaMgoQVHJhbnNsYXRpb25FbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBQg0KC19yZXF1ZXN0X2lkQgsKCV9zcmNfbGFuZ0ILCglfZHN0X2xhbmcibgoTTExNVHJhbnNsYXRlUmVxdWVzdBIMCgR0ZXh0GAEgASgJEhEKCWZyb21fbGFuZxgCIAEoCRIPCgd0b19sYW5nGAMgASgJEhAKCHNlbnNlX2lkGAQgASgJEhMKC2ZpbmdlcnByaW50GAUgASgJIk8KFExMTVRyYW5zbGF0ZVJlc3BvbnNlEhMKC3RyYW5zbGF0aW9uGAEgASgJEhEKCWZyb21fbGFuZxgCIAEoCRIPCgd0b19sYW5nGAMgASgJMs4EChJUcmFuc2xhdGlvblNlcnZpY2USjAEKEUdldFNlbnNlVHJhbnNsYXRlEiUudHJhbnNsYXRpb24uR2V0U2Vuc2VUcmFuc2xhdGVSZXF1ZXN0GiYudHJhbnNsYXRpb24uR2V0U2Vuc2VUcmFuc2xhdGVSZXNwb25zZSIogtPkkwIiEiAvdjEvdHJhbnNsYXRpb24vc2Vuc2Uve3NlbnNlX2lkfRJgCg9UcmFuc2xhdGVTdHJlYW0SIy50cmFuc2xhdGlvbi5UcmFuc2xhdGVTdHJlYW1SZXF1ZXN0GiQudHJhbnNsYXRpb24uVHJhbnNsYXRlU3RyZWFtUmVzcG9uc2UiADABEmkKFlRyYW5zbGF0ZUJpZGlyZWN0aW9uYWwSIy50cmFuc2xhdGlvbi5UcmFuc2xhdGVTdHJlYW1SZXF1ZXN0GiQudHJhbnNsYXRpb24uVHJhbnNsYXRlU3RyZWFtUmVzcG9uc2UiACgBMAESfQoMTExNVHJhbnNsYXRlEiAudHJhbnNsYXRpb24uTExNVHJhbnNsYXRlUmVxdWVzdBohLnRyYW5zbGF0aW9uLkxMTVRyYW5zbGF0ZVJlc3BvbnNlIiiC0+STAiI6ASoiHS92MS90cmFuc2xhdGlvbi9sbG0tdHJhbnNsYXRlEl0KEkxMTVRyYW5zbGF0ZVN0cmVhbRIgLnRyYW5zbGF0aW9uLkxMTVRyYW5zbGF0ZVJlcXVlc3QaIS50cmFuc2xhdGlvbi5MTE1UcmFuc2xhdGVSZXNwb25zZSIAMAFCLlosYXBpLmxha2VyLmRldi9wcm90by9nZW4vZ28vcHJvdG87dHJhbnNsYXRpb25iBnByb3RvMw", [file_google_api_annotations]);
 
 /**
  * GetSenseTranslateRequest 查询指定sense的翻译请求
@@ -161,6 +161,35 @@ export const GetSenseTranslateResponseSchema: GenMessage<GetSenseTranslateRespon
   messageDesc(file_proto_translation, 2);
 
 /**
+ * TextRequest 单个文本翻译请求
+ * 用于批量翻译未缓存文本场景
+ *
+ * @generated from message translation.TextRequest
+ */
+export type TextRequest = Message<"translation.TextRequest"> & {
+  /**
+   * 要翻译的原文
+   *
+   * @generated from field: string text = 1;
+   */
+  text: string;
+
+  /**
+   * 源语言，可选，如果未提供使用默认
+   *
+   * @generated from field: optional string from_lang = 2;
+   */
+  fromLang?: string;
+};
+
+/**
+ * Describes the message translation.TextRequest.
+ * Use `create(TextRequestSchema)` to create a new message.
+ */
+export const TextRequestSchema: GenMessage<TextRequest> = /*@__PURE__*/
+  messageDesc(file_proto_translation, 3);
+
+/**
  * TranslateStreamRequest 流式翻译请求
  *
  * @generated from message translation.TranslateStreamRequest
@@ -246,6 +275,14 @@ export type TranslateStreamRequest = Message<"translation.TranslateStreamRequest
    * @generated from field: optional string corrected_translation = 11;
    */
   correctedTranslation?: string;
+
+  /**
+   * 批量翻译未缓存文本列表
+   * JS SDK 批量翻译未命中缓存的文本时使用
+   *
+   * @generated from field: repeated translation.TextRequest texts = 12;
+   */
+  texts: TextRequest[];
 };
 
 /**
@@ -253,7 +290,7 @@ export type TranslateStreamRequest = Message<"translation.TranslateStreamRequest
  * Use `create(TranslateStreamRequestSchema)` to create a new message.
  */
 export const TranslateStreamRequestSchema: GenMessage<TranslateStreamRequest> = /*@__PURE__*/
-  messageDesc(file_proto_translation, 3);
+  messageDesc(file_proto_translation, 4);
 
 /**
  * TranslateStreamResponse 流式翻译响应
@@ -326,7 +363,91 @@ export type TranslateStreamResponse = Message<"translation.TranslateStreamRespon
  * Use `create(TranslateStreamResponseSchema)` to create a new message.
  */
 export const TranslateStreamResponseSchema: GenMessage<TranslateStreamResponse> = /*@__PURE__*/
-  messageDesc(file_proto_translation, 4);
+  messageDesc(file_proto_translation, 5);
+
+/**
+ * LLMTranslateRequest 大模型翻译请求
+ *
+ * @generated from message translation.LLMTranslateRequest
+ */
+export type LLMTranslateRequest = Message<"translation.LLMTranslateRequest"> & {
+  /**
+   * 要翻译的原文
+   *
+   * @generated from field: string text = 1;
+   */
+  text: string;
+
+  /**
+   * 源语言
+   *
+   * @generated from field: string from_lang = 2;
+   */
+  fromLang: string;
+
+  /**
+   * 目标语言
+   *
+   * @generated from field: string to_lang = 3;
+   */
+  toLang: string;
+
+  /**
+   * 语义sense ID，可选
+   *
+   * @generated from field: string sense_id = 4;
+   */
+  senseId: string;
+
+  /**
+   * 用户指纹，可选
+   *
+   * @generated from field: string fingerprint = 5;
+   */
+  fingerprint: string;
+};
+
+/**
+ * Describes the message translation.LLMTranslateRequest.
+ * Use `create(LLMTranslateRequestSchema)` to create a new message.
+ */
+export const LLMTranslateRequestSchema: GenMessage<LLMTranslateRequest> = /*@__PURE__*/
+  messageDesc(file_proto_translation, 6);
+
+/**
+ * LLMTranslateResponse 大模型翻译响应
+ *
+ * @generated from message translation.LLMTranslateResponse
+ */
+export type LLMTranslateResponse = Message<"translation.LLMTranslateResponse"> & {
+  /**
+   * 翻译结果
+   *
+   * @generated from field: string translation = 1;
+   */
+  translation: string;
+
+  /**
+   * 源语言
+   *
+   * @generated from field: string from_lang = 2;
+   */
+  fromLang: string;
+
+  /**
+   * 目标语言
+   *
+   * @generated from field: string to_lang = 3;
+   */
+  toLang: string;
+};
+
+/**
+ * Describes the message translation.LLMTranslateResponse.
+ * Use `create(LLMTranslateResponseSchema)` to create a new message.
+ */
+export const LLMTranslateResponseSchema: GenMessage<LLMTranslateResponse> = /*@__PURE__*/
+  messageDesc(file_proto_translation, 7);
 
 /**
  * TranslationService 翻译服务
@@ -357,6 +478,40 @@ export const TranslationService: GenService<{
     methodKind: "server_streaming";
     input: typeof TranslateStreamRequestSchema;
     output: typeof TranslateStreamResponseSchema;
+  },
+  /**
+   * TranslateBidirectional 双向流式翻译
+   * 客户端可以持续发送多个查询请求，服务端持续推送结果
+   * 适合交互式翻译场景
+   *
+   * @generated from rpc translation.TranslationService.TranslateBidirectional
+   */
+  translateBidirectional: {
+    methodKind: "bidi_streaming";
+    input: typeof TranslateStreamRequestSchema;
+    output: typeof TranslateStreamResponseSchema;
+  },
+  /**
+   * LLMTranslate 大模型翻译（一元RPC）
+   * 使用配置的大模型翻译provider进行实时翻译
+   *
+   * @generated from rpc translation.TranslationService.LLMTranslate
+   */
+  lLMTranslate: {
+    methodKind: "unary";
+    input: typeof LLMTranslateRequestSchema;
+    output: typeof LLMTranslateResponseSchema;
+  },
+  /**
+   * LLMTranslateStream 大模型流式翻译
+   * 使用配置的大模型翻译provider进行实时翻译，流式推送结果
+   *
+   * @generated from rpc translation.TranslationService.LLMTranslateStream
+   */
+  lLMTranslateStream: {
+    methodKind: "server_streaming";
+    input: typeof LLMTranslateRequestSchema;
+    output: typeof LLMTranslateResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_proto_translation, 0);

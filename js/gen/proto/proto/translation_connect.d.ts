@@ -33,5 +33,42 @@ export declare const TranslationService: {
             readonly O: any;
             readonly kind: MethodKind.ServerStreaming;
         };
+        /**
+         * TranslateBidirectional 双向流式翻译
+         * 客户端可以持续发送多个查询请求，服务端持续推送结果
+         * 适合交互式翻译场景
+         *
+         * @generated from rpc translation.TranslationService.TranslateBidirectional
+         */
+        readonly translateBidirectional: {
+            readonly name: "TranslateBidirectional";
+            readonly I: any;
+            readonly O: any;
+            readonly kind: MethodKind.BiDiStreaming;
+        };
+        /**
+         * LLMTranslate 大模型翻译（一元RPC）
+         * 使用配置的大模型翻译provider进行实时翻译
+         *
+         * @generated from rpc translation.TranslationService.LLMTranslate
+         */
+        readonly lLMTranslate: {
+            readonly name: "LLMTranslate";
+            readonly I: any;
+            readonly O: any;
+            readonly kind: MethodKind.Unary;
+        };
+        /**
+         * LLMTranslateStream 大模型流式翻译
+         * 使用配置的大模型翻译provider进行实时翻译，流式推送结果
+         *
+         * @generated from rpc translation.TranslationService.LLMTranslateStream
+         */
+        readonly lLMTranslateStream: {
+            readonly name: "LLMTranslateStream";
+            readonly I: any;
+            readonly O: any;
+            readonly kind: MethodKind.ServerStreaming;
+        };
     };
 };

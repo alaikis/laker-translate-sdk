@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { GetSenseTranslateRequest, GetSenseTranslateResponse, TranslateStreamRequest, TranslateStreamResponse } from "./translation_pb.js";
+import { GetSenseTranslateRequest, GetSenseTranslateResponse, LLMTranslateRequest, LLMTranslateResponse, TranslateStreamRequest, TranslateStreamResponse } from "./translation_pb.js";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -38,6 +38,43 @@ export const TranslationService = {
       name: "TranslateStream",
       I: TranslateStreamRequest,
       O: TranslateStreamResponse,
+      kind: MethodKind.ServerStreaming,
+    },
+    /**
+     * TranslateBidirectional 双向流式翻译
+     * 客户端可以持续发送多个查询请求，服务端持续推送结果
+     * 适合交互式翻译场景
+     *
+     * @generated from rpc translation.TranslationService.TranslateBidirectional
+     */
+    translateBidirectional: {
+      name: "TranslateBidirectional",
+      I: TranslateStreamRequest,
+      O: TranslateStreamResponse,
+      kind: MethodKind.BiDiStreaming,
+    },
+    /**
+     * LLMTranslate 大模型翻译（一元RPC）
+     * 使用配置的大模型翻译provider进行实时翻译
+     *
+     * @generated from rpc translation.TranslationService.LLMTranslate
+     */
+    lLMTranslate: {
+      name: "LLMTranslate",
+      I: LLMTranslateRequest,
+      O: LLMTranslateResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * LLMTranslateStream 大模型流式翻译
+     * 使用配置的大模型翻译provider进行实时翻译，流式推送结果
+     *
+     * @generated from rpc translation.TranslationService.LLMTranslateStream
+     */
+    lLMTranslateStream: {
+      name: "LLMTranslateStream",
+      I: LLMTranslateRequest,
+      O: LLMTranslateResponse,
       kind: MethodKind.ServerStreaming,
     },
   }
