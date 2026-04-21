@@ -1911,9 +1911,9 @@ class TranslationClient {
           const requestId = `${text}-${Date.now()}-${Math.random()}`;
           const req = TranslateStreamRequest.fromJson({
             text,
-            sense_id: this.senseId,
-            to_lang: toLang,
-            from_lang: actualFromLang,
+            senseId: this.senseId,
+            toLang: toLang,
+            fromLang: actualFromLang,
             fingerprint: actualFingerprint,
             requestId: requestId,
             persistent: true,
@@ -1965,8 +1965,8 @@ class TranslationClient {
       // Use TranslateStream for translation - accumulate all responses
      const req = TranslateStreamRequest.fromJson({
       text,
-      to_lang: toLang,
-      from_lang: actualFromLang,
+      toLang: toLang,
+      fromLang: actualFromLang,
       fingerprint: actualFingerprint,
      });
      
@@ -2034,13 +2034,13 @@ class TranslationClient {
      // All requests go in the same single HTTP/2 streaming connection
      // This creates only ONE request entry in browser developer tools network panel
      const req = TranslateStreamRequest.fromJson({
-       sense_id: this.senseId,
-       dst_lang: toLang,
+       senseId: this.senseId,
+       dstLang: toLang,
        fingerprint,
        persistent: false,
        texts: texts.map(t => ({
          text: t.text,
-         from_lang: t.fromLang,
+         fromLang: t.fromLang,
        })),
      });
      const stream = this.client.translateStream(req) as unknown as AsyncIterable<TranslateStreamResponse>;
@@ -2062,8 +2062,8 @@ class TranslationClient {
     fingerprint?: string
   ): AsyncIterable<TranslateStreamResponse> {
     const req = TranslateStreamRequest.fromJson({
-      sense_id: senseId,
-      dst_lang: dstLang,
+      senseId: senseId,
+      dstLang: dstLang,
     });
     if (fingerprint) {
       req.fingerprint = fingerprint;
