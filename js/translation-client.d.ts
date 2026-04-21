@@ -90,6 +90,7 @@ declare class TranslationPool {
     pools: Map<string, Map<string, string>>;
     currentFingerprint: string | null;
     currentToLang: string | null;
+    defaultFromLang?: string;
     crossTabOptions: CrossTabOptions;
     broadcastChannel: BroadcastChannel | null;
     loading: boolean;

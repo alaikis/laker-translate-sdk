@@ -6046,6 +6046,7 @@ var LakerTranslation = (function (exports) {
             this.useIndexedDB = false;
             this.client = client;
             this.senseId = senseId;
+            this.defaultFromLang = options?.defaultFromLang;
             // Set up crossTabOptions with defaults
             this.crossTabOptions = {
                 ...defaultCrossTabOptions,
@@ -6739,6 +6740,10 @@ var LakerTranslation = (function (exports) {
             }
             if (fingerprint) {
                 jsonRequest.fingerprint = fingerprint;
+            }
+            // Add src_lang filter if defaultFromLang is configured
+            if (this.defaultFromLang) {
+                jsonRequest.src_lang = this.defaultFromLang;
             }
             const req = TranslateStreamRequest.fromJson(jsonRequest);
             console.log(`[TranslationPool] Sending batch initialization request:`, jsonRequest);
@@ -7627,8 +7632,13 @@ var LakerTranslation = (function (exports) {
             if (options.pageSize !== undefined) {
                 req.pageSize = options.pageSize;
             }
-            // Note: srcLang, dstLang, dstLangs are not supported in GetSenseTranslateRequest
-            // These fields are only available in TranslateStreamRequest
+            // Pass language filtering parameters: srcLang -> from_lang, dstLang -> to_lang
+            if (options.srcLang !== undefined) {
+                req.fromLang = options.srcLang;
+            }
+            if (options.dstLang !== undefined) {
+                req.toLang = options.dstLang;
+            }
             return (await this.client.getSenseTranslate(req));
         }
         /**
