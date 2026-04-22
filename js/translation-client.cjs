@@ -1001,7 +1001,7 @@ function mergeTemplate(template, vars) {
     return result;
 }
 // Version from package.json
-const version = '1.6.139';
+const version = '1.6.148';
 class TranslationPool {
     /**
      * Add a pending resolution for a persistent stream request
@@ -2432,6 +2432,7 @@ class TranslationClient {
             crossTab: options.crossTab,
             backgroundUpdate: options.backgroundUpdate,
             persistentStorage: options.persistentStorage,
+            defaultFromLang: this.defaultFromLang,
         });
     }
     /**

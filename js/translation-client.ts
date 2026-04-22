@@ -174,7 +174,7 @@ export function mergeTemplate(template: string, vars: Record<string, string | nu
 }
 
 // Version from package.json
-export const version = '1.6.139';
+export const version = '1.6.148';
 
 type CrossTabOptions = {
   enabled: boolean;
@@ -1853,6 +1853,7 @@ class TranslationClient {
       crossTab: options.crossTab,
       backgroundUpdate: options.backgroundUpdate,
       persistentStorage: options.persistentStorage,
+      defaultFromLang: this.defaultFromLang,
     });
   }
 
