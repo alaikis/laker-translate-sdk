@@ -1,0 +1,12 @@
+version: v1
+plugins:
+  - plugin: es
+    out: ./gen/proto
+    opt:
+      - target=ts
+      - import_extension=.js
+  - plugin: connect-es
+    out: ./gen/proto
+    opt:
+      - target=ts
+      - import_extension=.js
