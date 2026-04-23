@@ -1001,7 +1001,7 @@ function mergeTemplate(template, vars) {
     return result;
 }
 // Version from package.json
-const version = '1.6.148';
+const version = '1.6.149';
 class TranslationPool {
     /**
      * Add a pending resolution for a persistent stream request
