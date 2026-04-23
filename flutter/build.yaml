@@ -1,0 +1,9 @@
+targets:
+  $default:
+    builders:
+      protobuf:
+        generate_for:
+          - proto/**.proto
+        options:
+          # Configuration for protobuf generation
+          output_dir: lib/src/proto

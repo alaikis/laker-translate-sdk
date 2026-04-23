@@ -1,0 +1,42 @@
+name: flutter
+description: Alaikis Translation Service Flutter SDK - 提供离线翻译池缓存和连接api.laker.dev服务的Flutter插件
+version: 1.6.148
+homepage: https://www.laker.dev
+repository: https://github.com/alaikis/api.laker.dev
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # gRPC for Dart
+  grpc: ^4.0.0
+  protobuf: ^4.1.0
+  # HTTP client for connectrpc
+  http: ^1.1.0
+  # Local storage - using Hive for fast persistent storage (alternative to IndexedDB)
+  hive: ^2.2.3
+  # JSON serialization
+  json_annotation: ^4.8.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  build_runner: ^2.4.0
+  json_serializable: ^6.7.0
+  protoc_plugin: ^22.4.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.laker.api.flutter
+        pluginClass: AlaikisTranslationFlutterPlugin
+      ios:
+        pluginClass: AlaikisTranslationFlutterPlugin
+      web:
+        pluginClass: AlaikisTranslationFlutterWeb
+        fileName: alaikis_translation_flutter_web.dart

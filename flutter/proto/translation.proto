@@ -1,0 +1,171 @@
+syntax = "proto3";
+
+package translation;
+option go_package = "api.laker.dev/proto/gen/go/proto;translation";
+
+import "google/api/annotations.proto";
+
+// TranslationService 翻译服务
+// 提供统一的翻译查询接口，支持普通查询和流式推送
+service TranslationService {
+  // GetSenseTranslate 查询指定sense的翻译，一次性返回所有结果
+  // 类似现有的REST API端点
+  rpc GetSenseTranslate(GetSenseTranslateRequest) returns (GetSenseTranslateResponse) {
+    option (google.api.http) = {
+      get: "/v1/translation/sense/{sense_id}"
+    };
+  }
+
+  // TranslateStream 服务器流式推送翻译结果
+  // 客户端发送一个查询请求，服务端逐条推送翻译结果
+  // 适合大数据量实时推送场景
+  rpc TranslateStream(TranslateStreamRequest) returns (stream TranslateStreamResponse) {}
+
+  // TranslateBidirectional 双向流式翻译
+  // 客户端可以持续发送多个查询请求，服务端持续推送结果
+  // 适合交互式翻译场景
+  rpc TranslateBidirectional(stream TranslateStreamRequest) returns (stream TranslateStreamResponse) {}
+
+  // LLMTranslate 大模型翻译（一元RPC）
+  // 使用配置的大模型翻译provider进行实时翻译
+  rpc LLMTranslate(LLMTranslateRequest) returns (LLMTranslateResponse) {
+    option (google.api.http) = {
+      post: "/v1/translation/llm-translate"
+      body: "*"
+    };
+  }
+
+  // LLMTranslateStream 大模型流式翻译
+  // 使用配置的大模型翻译provider进行实时翻译，流式推送结果
+  rpc LLMTranslateStream(LLMTranslateRequest) returns (stream LLMTranslateResponse) {}
+}
+
+// GetSenseTranslateRequest 查询指定sense的翻译请求
+message GetSenseTranslateRequest {
+  // 语义sense ID，必填
+  string sense_id = 1;
+  // 用户指纹，用于查询个性化翻译，可选
+  optional string fingerprint = 2;
+  // 页码，默认1
+  int32 page = 3;
+  // 每页大小，默认1000，最大5000
+  int32 page_size = 4;
+  // 源语言过滤，可选，只返回指定源语言的翻译
+  string from_lang = 5;
+  // 目标语言过滤，可选，只返回指定目标语言的翻译
+  string to_lang = 6;
+}
+// TranslateRecord 单条翻译记录
+message TranslateRecord {
+  // 原文
+  string text = 1;
+  // 译文
+  string translate = 2;
+}
+
+// GetSenseTranslateResponse 翻译查询响应
+message GetSenseTranslateResponse {
+  // 通用翻译，key是原文，value是译文
+  map<string, string> common = 1;
+  // 个性化翻译，key是原文，value是译文，只有提供fingerprint时才有
+  map<string, string> special = 2;
+  // 当前页码
+  int32 page = 3;
+  // 每页大小
+  int32 page_size = 4;
+  // 总记录数
+  int64 total = 5;
+  // 总页数
+  int64 total_pages = 6;
+  // 个性化翻译总记录数，只有提供fingerprint时才有
+  int64 special_total = 7;
+}
+
+// TextRequest 单个文本翻译请求
+// 用于批量翻译未缓存文本场景
+message TextRequest {
+  // 要翻译的原文
+  string text = 1;
+  // 源语言，可选，如果未提供使用默认
+  optional string from_lang = 2;
+}
+
+// TranslateStreamRequest 流式翻译请求
+message TranslateStreamRequest {
+  // 用户输入文本（可选，用于上下文）
+  string text = 1;
+  // 要查询的sense ID
+  string sense_id = 2;
+  // 用户指纹，可选
+  string fingerprint = 3;
+  // 源语言，可选，用于翻译
+  string from_lang = 4;
+  // 目标语言，必填，用于翻译
+  string to_lang = 5;
+  // 源语言过滤，可选，只返回指定源语言的翻译
+  string src_lang = 6;
+  // 目标语言过滤，可选，只返回指定目标语言的翻译（预加载翻译池必填）
+  string dst_lang = 7;
+  // 请求唯一ID，用于匹配持久流式连接的响应
+  // 每个请求通过 request_id 匹配对应响应
+  optional string request_id = 8;
+  // 是否保持持久连接
+  // 如果为 true，服务器会持续处理所有 pending 请求并不主动关闭连接
+  optional bool persistent = 9;
+  // 是否是人工翻译纠正请求
+  // 当用户人工纠正翻译后，设置为 true，同时提供 corrected_translation
+  optional bool is_correction = 10;
+  // 人工纠正后的翻译结果
+  // 配合 is_correction=true 使用
+  optional string corrected_translation = 11;
+  // 批量翻译未缓存文本列表
+  // JS SDK 批量翻译未命中缓存的文本时使用
+  repeated TextRequest texts = 12;
+}
+
+// TranslateStreamResponse 流式翻译响应
+message TranslateStreamResponse {
+  // 原始请求文本
+  string original_text = 1;
+  // 翻译结果，key是原文，value是译文
+  map<string, string> translation = 2;
+  // 时间戳
+  int64 timestamp = 3;
+  // 是否是最后一条消息，完成标识
+  bool finished = 4;
+  // 当前批次序号，从0开始
+  int32 batch_index = 5;
+  // 请求唯一ID，匹配请求的 request_id
+  // 如果是持久流式连接，必须携带 request_id
+  optional string request_id = 6;
+  // 源语言代码
+  // JS SDK可以根据返回的src_lang决定缓存键
+  optional string src_lang = 7;
+  // 目标语言代码
+  // JS SDK可以根据返回的dst_lang决定缓存键
+  optional string dst_lang = 8;
+}
+
+// LLMTranslateRequest 大模型翻译请求
+message LLMTranslateRequest {
+  // 要翻译的原文
+  string text = 1;
+  // 源语言
+  string from_lang = 2;
+  // 目标语言
+  string to_lang = 3;
+  // 语义sense ID，可选
+  string sense_id = 4;
+  // 用户指纹，可选
+  string fingerprint = 5;
+}
+
+// LLMTranslateResponse 大模型翻译响应
+message LLMTranslateResponse {
+  // 翻译结果
+  string translation = 1;
+  // 源语言
+  string from_lang = 2;
+  // 目标语言
+  string to_lang = 3;
+}
