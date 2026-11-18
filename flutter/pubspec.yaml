@@ -1,0 +1,28 @@
+name: laker_translation
+description: Laker Translation Service SDK for Flutter - Connect RPC client with caching, fingerprint support, and cross-platform storage.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  shared_preferences: ^2.2.0
+
+  # 可选：大缓存持久化
+  hive: ^2.2.3
+
+  # 可选：Token 安全持久化
+  flutter_secure_storage: ^9.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  # 无插件资产

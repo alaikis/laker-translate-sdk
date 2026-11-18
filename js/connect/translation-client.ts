@@ -25,6 +25,19 @@ import type { Transport, Interceptor } from '@connectrpc/connect';
 // Import IndexedDB wrapper for browser cache storage
 import { TranslationIndexedDB, defaultTranslationDB } from './indexeddb';
 
+// Import environment detection and storage abstractions（Expo / 原生 RN 兼容）
+import { detectEnvironment } from './env';
+import type { RuntimeEnv } from './env';
+import {
+  MemoryStorage,
+  LocalStorageAdapter,
+  AsyncStorageAdapter,
+  ExpoSecureStoreToken,
+} from './storage';
+import type { PersistentStorage, CacheEntry } from './storage/types';
+import type { AsyncStorageInstance } from './storage/async-storage';
+import { tryLazyRequire } from './lazy-require';
+
 // For browser environments, we statically import connect-web
 // because it's already external in the rollup config and user's project has it installed
 // This ensures createConnectTransport is available synchronously
@@ -178,7 +191,7 @@ export function mergeTemplate(template: string, vars: Record<string, string | nu
 }
 
 // Version from package.json
-export const version = '1.6.150';
+export const version = '1.7.0';
 
 type CrossTabOptions = {
   enabled: boolean;
@@ -197,6 +210,11 @@ type TranslationPoolOptions = {
   crossTab?: Partial<CrossTabOptions>;
   persistentStorage?: unknown;
   backgroundUpdate?: Partial<BackgroundUpdateOptions>;
+  /**
+   * 显式控制是否启用后台更新定时器。
+   * 缺省时由 TranslationClient 根据运行时环境判断（移动端默认禁用）
+   */
+  backgroundUpdateEnabled?: boolean;
   senseId?: string;
   defaultFromLang?: string;
   /**
@@ -294,8 +312,13 @@ class TranslationPool {
     };
     
     // Set up backgroundUpdateOptions with defaults
+    // 优先级：显式 backgroundUpdateEnabled > options.backgroundUpdate.enabled > 默认 false
+    const backgroundUpdateEnabled =
+      options?.backgroundUpdateEnabled ??
+      options?.backgroundUpdate?.enabled ??
+      false;
     this.backgroundUpdateOptions = {
-      enabled: options?.backgroundUpdate?.enabled ?? false,
+      enabled: backgroundUpdateEnabled,
       intervalMs: options?.backgroundUpdate?.intervalMs ?? 5 * 60 * 1000,
       batchSize: options?.backgroundUpdate?.batchSize ?? 50,
       staleThresholdMs:
@@ -1664,14 +1687,32 @@ class TranslationPool {
 export type TranslationClientOptions = {
   baseUrl?: string;
   senseId: string;
-  defaultFromLang?: string;
-  token?: string; // Authentication token for API access
-  crossTab?: Partial<CrossTabOptions>;
-  backgroundUpdate?: Partial<BackgroundUpdateOptions>;
-  persistentStorage?: unknown;
-  transport?: Transport; // Optional: provide an already created transport for advanced use cases
-  createConnectTransport?: (options: any) => Transport; // Optional: provide createConnectTransport for Node.js ESM use case
-};
+   defaultFromLang?: string;
+   token?: string; // Authentication token for API access
+   crossTab?: Partial<CrossTabOptions>;
+   backgroundUpdate?: Partial<BackgroundUpdateOptions>;
+   persistentStorage?: unknown;
+   transport?: Transport; // Optional: provide an already created transport for advanced use cases
+   createConnectTransport?: (options: any) => Transport; // Optional: provide createConnectTransport for Node.js ESM use case
+   /**
+    * 运行平台选择。缺省 'auto' 按 detectEnvironment() 自动选择。
+    * - 'web'：强制浏览器路径
+    * - 'node'：强制 Node.js 路径
+    * - 'expo'：启用 native 默认行为（SecureStore + AsyncStorage + 禁用持久流/backgroundUpdate）
+    */
+   platform?: 'auto' | 'web' | 'node' | 'expo';
+   /**
+    * Native 模块选项（Expo/原生 RN 专用）
+    */
+   native?: {
+     useSecureStore?: boolean;
+     useAsyncStorage?: boolean;
+   };
+   /**
+    * 强制禁用持久流连接（移动端环境默认禁用）
+    */
+   disablePersistentStream?: boolean;
+ };
 
 class TranslationClient {
   baseUrl: string;
@@ -1686,9 +1727,37 @@ class TranslationClient {
   persistentStreamWriter: ((req: TranslateStreamRequest) => Promise<void>) | null = null;
   persistentStreamReader: (() => Promise<void>) | null = null;
   persistentStreamConnected: boolean = false;
+  // 运行时环境与持久存储后端（Expo / 原生 RN 兼容）
+  private runtimeEnv: RuntimeEnv;
+  private persistentStorage: PersistentStorage;
+  // 可选：Expo SecureStore token 持久化（仅 platform='expo' 时启用）
+  private secureStoreToken: ExpoSecureStoreToken | null = null;
+  // 持久流是否被禁用（移动端环境或显式禁用）
+  private persistentStreamDisabled: boolean;
 
   constructor(options: TranslationClientOptions) {
     this.options = options;
+    this.runtimeEnv = detectEnvironment();
+
+    // 选择持久存储后端
+    this.persistentStorage = this.selectPersistentStorage(options);
+
+    // 初始化 Expo SecureStore（仅 Expo 平台）
+    if (options.platform === 'expo' && options.native?.useSecureStore !== false) {
+      const secureStoreModule = tryLazyRequire<import('./storage/secure-store').SecureStoreInstance>(
+        'expo-secure-store',
+        'SecureStore'
+      );
+      if (secureStoreModule) {
+        this.secureStoreToken = new ExpoSecureStoreToken(secureStoreModule);
+      }
+    }
+
+    // 持久流在移动端默认禁用（后台挂起后长连接无意义）
+    this.persistentStreamDisabled =
+      options.disablePersistentStream === true ||
+      this.runtimeEnv.isReactNative ||
+      options.platform === 'expo';
      // If baseUrl is not provided, use the default production endpoint
      // The baseUrl should include the API path prefix for Connect RPC
      // New route structure: /api/v1/rpc/cr/<service>/<method>
@@ -1853,13 +1922,54 @@ class TranslationClient {
     this.senseId = options.senseId;
     this.defaultFromLang = options.defaultFromLang || 'en';
     
-    // Create and manage translation pool internally
-    this.pool = new TranslationPool(this, this.senseId, {
-      crossTab: options.crossTab,
-      backgroundUpdate: options.backgroundUpdate,
-      persistentStorage: options.persistentStorage,
-      defaultFromLang: this.defaultFromLang,
-    });
+     // Create and manage translation pool internally
+     this.pool = new TranslationPool(this, this.senseId, {
+       crossTab: options.crossTab,
+       backgroundUpdate: options.backgroundUpdate,
+       persistentStorage: options.persistentStorage,
+       defaultFromLang: this.defaultFromLang,
+       // 移动端默认禁用 backgroundUpdate（后台挂起后定时器冻结）
+       backgroundUpdateEnabled: this.shouldEnableBackgroundUpdate(options),
+     });
+  }
+
+  /**
+   * 根据运行时环境和配置选择持久存储后端
+   * - 移动端（Expo/RN）：AsyncStorage（惰性加载），缺失时降级 MemoryStorage
+   * - 浏览器：LocalStorage（保持现有行为）
+   * - Node.js / 其他：MemoryStorage
+   */
+  private selectPersistentStorage(options: TranslationClientOptions): PersistentStorage {
+    const nativeOpts = options.native;
+    if (options.platform === 'expo' || (this.runtimeEnv.isReactNative && !this.runtimeEnv.hasLocalStorage)) {
+      if (nativeOpts?.useAsyncStorage !== false) {
+        const asyncStorage = tryLazyRequire<AsyncStorageInstance>(
+          '@react-native-async-storage/async-storage',
+          'AsyncStorage'
+        );
+        if (asyncStorage) {
+          return new AsyncStorageAdapter(asyncStorage);
+        }
+      }
+      return new MemoryStorage();
+    }
+    if (this.runtimeEnv.hasLocalStorage) {
+      return new LocalStorageAdapter(
+        options.crossTab?.storageKeyPrefix ?? 'laker_translation_'
+      );
+    }
+    return new MemoryStorage();
+  }
+
+  /**
+   * 判断是否启用后台更新定时器
+   * 移动端默认禁用（后台挂起后定时器冻结，重新进入前台后手动 preload 刷新）
+   */
+  private shouldEnableBackgroundUpdate(options: TranslationClientOptions): boolean {
+    if (this.runtimeEnv.isReactNative || options.platform === 'expo') {
+      return options.backgroundUpdate?.enabled === true; // 移动端默认 false
+    }
+    return options.backgroundUpdate?.enabled ?? false;
   }
 
   /**
@@ -2153,11 +2263,16 @@ class TranslationClient {
    * Only one persistent stream is maintained at a time.
    * @returns Promise that resolves when the stream is connected and ready
    */
-  async startPersistentStream(): Promise<void> {
-    if (this.persistentStreamConnected) {
-      console.log('[TranslationClient] Persistent stream already connected');
-      return;
-    }
+   async startPersistentStream(): Promise<void> {
+     // 移动端或显式禁用时，跳过持久流（后台挂起后长连接无意义）
+     if (this.persistentStreamDisabled) {
+       console.log('[TranslationClient] 持久流已禁用（移动端环境），使用按需流式请求');
+       return;
+     }
+     if (this.persistentStreamConnected) {
+       console.log('[TranslationClient] Persistent stream already connected');
+       return;
+     }
     if (this.persistentStream) {
       console.log('[TranslationClient] Persistent stream already started, reconnecting...');
     }

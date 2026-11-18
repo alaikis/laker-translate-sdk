@@ -191,8 +191,89 @@ console.log(result);
 
 - **浏览器**: 使用 `@connectrpc/connect-web`，基于 Fetch API
 - **Node.js**: 使用 `@connectrpc/connect-node`，基于 HTTP/2
+- **Expo / React Native**: 使用 `@connectrpc/connect-web`（fetch API），可选 `expo-secure-store`（token 持久化）与 `@react-native-async-storage/async-storage`（缓存持久化）
+- **Flutter**: 使用 `laker_translation` Dart 包（`sdk/flutter/`），基于 Connect RPC HTTP 端点
 
-SDK 会自动检测环境并选择合适的传输层，无需手动配置。
+SDK 会自动检测运行环境并选择合适的传输层与存储后端，无需手动配置。
+
+## Expo / React Native 集成
+
+### 最低版本要求
+
+- Expo >= 49
+- React Native >= 57
+- Node.js >= 18（CI 环境）
+
+### 安装
+
+```bash
+# 主 SDK
+npm install @alaikis/translation-sdk
+
+# 可选：启用 AsyncStorage 缓存持久化
+npx expo install @react-native-async-storage/async-storage
+
+# 可选：启用 SecureStore token 持久化
+npx expo install expo-secure-store
+```
+
+### 使用
+
+```typescript
+import { createTranslation } from '@alaikis/translation-sdk/expo';
+
+const client = createTranslation({
+  token: 'your-jwt-token',
+  senseId: 'your-sense-id',
+});
+
+const translated = await client.translate('Hello', 'zh');
+console.log(translated); // 你好
+```
+
+### 原生 React Native 集成（非 Expo）
+
+```bash
+# 原生 RN 项目（非 Expo CLI）
+npm install @react-native-async-storage/async-storage
+```
+
+```typescript
+import { createTranslationRN } from '@alaikis/translation-sdk/rn';
+
+const client = createTranslationRN({
+  token: 'your-jwt-token',
+  senseId: 'your-sense-id',
+});
+
+const translated = await client.translate('Hello', 'zh');
+```
+
+**与 Expo 的差异**：
+- 原生 RN 无 `Expo.Constants`，`detectEnvironment` 仅识别 `isReactNative`
+- 缓存持久化使用 `@react-native-async-storage/async-storage`（需手动安装）
+- Token 持久化可选使用 `expo-secure-store` 或自定义 SecureStore 实现
+
+### 可选依赖说明
+
+| 依赖 | 缺失时行为 |
+|------|------------|
+| `@react-native-async-storage/async-storage` | 缓存降级为内存存储（无跨会话持久化），功能完整 |
+| `expo-secure-store` | token 仅在内存中持有（无持久化），功能完整 |
+
+两个依赖均为 optional，SDK 通过惰性 `require` 加载，缺失时仅 `console.warn` 一次。
+
+### Hermes 兼容性
+
+SDK 构建产物（`.cjs` / `.js` / `.iife.js`）不包含 `import.meta`，Hermes 引擎可直接加载。
+
+### 离线限制
+
+应用进入后台后系统挂起所有 JS 任务。SDK 在移动端默认禁用：
+- 持久流连接（后台挂起后长连接无意义）
+- `backgroundUpdate` 定时器（后台冻结）
+
+重新进入前台后调用 `client.preload()` 刷新缓存。
 
 ## 构建
 

@@ -6,7 +6,8 @@ Laker Translation Service SDK for multiple programming languages.
 
 ## Supported Languages
 
-- [TypeScript/JavaScript](./js/) - Browser and Node.js
+- [TypeScript/JavaScript](./js/) - Browser / Node.js / Expo (React Native) / React Native
+- [Flutter (Dart)](./flutter/) - Flutter / Dart (mobile)
 - [Go](./go/) - Go language
 - [PHP](./php/) - PHP language
 - [Python](./python/) - Python language

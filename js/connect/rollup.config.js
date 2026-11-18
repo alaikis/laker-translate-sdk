@@ -45,6 +45,8 @@ const mainConfig = {
     /^@bufbuild\//,
     /^@connectrpc\//,
     /^broadcast-channel/,
+    /^@react-native-async-storage\//,
+    /^expo-secure-store$/,
     /^assert$/,
     /^net$/,
     /^http$/,
@@ -100,4 +102,132 @@ const mainConfig = {
   ]
 };
 
-export default [mainConfig, browserConfig];
+// Expo / React Native 入口构建（./expo 子路径）
+const nativeConfig = {
+  input: 'native/index.ts',
+  output: [
+    {
+      file: 'native/index.cjs',
+      format: 'cjs',
+      sourcemap: true,
+      exports: 'named',
+      inlineDynamicImports: true,
+    },
+    {
+      file: 'native/index.js',
+      format: 'esm',
+      sourcemap: true,
+      exports: 'named',
+      inlineDynamicImports: true,
+    },
+  ],
+  external: [
+    /^@bufbuild\//,
+    /^@connectrpc\//,
+    /^broadcast-channel/,
+    /^@react-native-async-storage\//,
+    /^expo-secure-store$/,
+    /^assert$/,
+    /^net$/,
+    /^http$/,
+    /^https$/,
+    /^stream$/,
+    /^buffer$/,
+    /^util$/,
+    /^zlib$/,
+    /^querystring$/,
+    /^events$/,
+    /^url$/,
+    /^tls$/,
+    /^util\/types$/,
+    /^stream\/web$/,
+    /^node:stream$/,
+    /^node:util$/,
+    /^node:events$/,
+    /^async_hooks$/,
+    /^worker_threads$/,
+    /^perf_hooks$/,
+    /^string_decoder$/,
+    /^diagnostics_channel$/,
+    /^http2$/,
+  ],
+  plugins: [
+    nodeResolve({
+      browser: true,
+      preferBuiltins: false,
+      mainFields: ['browser', 'module', 'main'],
+    }),
+    commonjs({
+      include: /node_modules/,
+    }),
+    typescript({
+      include: ['**/*.ts'],
+    }),
+  ],
+};
+
+// 原生 React Native 入口构建（./rn 子路径）
+const rnConfig = {
+  input: 'rn/index.ts',
+  output: [
+    {
+      file: 'rn/index.cjs',
+      format: 'cjs',
+      sourcemap: true,
+      exports: 'named',
+      inlineDynamicImports: true,
+    },
+    {
+      file: 'rn/index.js',
+      format: 'esm',
+      sourcemap: true,
+      exports: 'named',
+      inlineDynamicImports: true,
+    },
+  ],
+  external: [
+    /^@bufbuild\//,
+    /^@connectrpc\//,
+    /^broadcast-channel/,
+    /^@react-native-async-storage\//,
+    /^expo-secure-store$/,
+    /^assert$/,
+    /^net$/,
+    /^http$/,
+    /^https$/,
+    /^stream$/,
+    /^buffer$/,
+    /^util$/,
+    /^zlib$/,
+    /^querystring$/,
+    /^events$/,
+    /^url$/,
+    /^tls$/,
+    /^util\/types$/,
+    /^stream\/web$/,
+    /^node:stream$/,
+    /^node:util$/,
+    /^node:events$/,
+    /^async_hooks$/,
+    /^worker_threads$/,
+    /^perf_hooks$/,
+    /^string_decoder$/,
+    /^diagnostics_channel$/,
+    /^http2$/,
+  ],
+  plugins: [
+    nodeResolve({
+      browser: true,
+      preferBuiltins: false,
+      mainFields: ['browser', 'module', 'main'],
+    }),
+    commonjs({
+      include: /node_modules/,
+    }),
+    typescript({
+      include: ['**/*.ts'],
+    }),
+  ],
+};
+
+export default [mainConfig, browserConfig, nativeConfig, rnConfig];

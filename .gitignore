@@ -18,3 +18,10 @@ node_modules/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Flutter / Dart build artifacts
+flutter/.dart_tool/
+flutter/build/
+flutter/.flutter-plugins
+flutter/.flutter-plugins-dependencies
+*.dart_tool/

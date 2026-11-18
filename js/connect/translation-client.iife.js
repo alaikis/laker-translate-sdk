@@ -318,6 +318,7 @@ var LakerTranslation = (function (exports) {
       typeof window !== "undefined" ? window : {});
 
     var env = {};
+    var versions = {};
 
     // from https://github.com/kumavis/browser-process-hrtime/blob/master/index.js
     var performance = global$1.performance || {};
@@ -329,7 +330,8 @@ var LakerTranslation = (function (exports) {
       function(){ return (new Date()).getTime() };
 
     var browser$1 = {
-      env: env};
+      env: env,
+      versions: versions};
 
     // Copyright 2008 Google Inc.  All rights reserved.
     //
@@ -6359,6 +6361,330 @@ var LakerTranslation = (function (exports) {
     // Default instance for use across the SDK
     new TranslationIndexedDB();
 
+    var cachedEnv = null;
+    /**
+     * 检测当前运行时环境
+     * @param overrides 测试用覆盖字段，提供时不写入缓存
+     */
+    function detectEnvironment(overrides) {
+        var _a;
+        if (cachedEnv && !overrides)
+            return cachedEnv;
+        var g = typeof globalThis !== 'undefined' ? globalThis : {};
+        var isNode = typeof browser$1 !== 'undefined' && ((_a = browser$1.versions) === null || _a === void 0 ? void 0 : _a.node) !== undefined;
+        var isReactNative = (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') ||
+            g.__native !== undefined;
+        var isExpo = isReactNative && g.__expo !== undefined;
+        var isBrowser = typeof window !== 'undefined' && !isReactNative;
+        var env = {
+            isBrowser: isBrowser,
+            isReactNative: isReactNative,
+            isExpo: isExpo,
+            isNode: isNode,
+            hasFetch: typeof fetch === 'function',
+            hasLocalStorage: typeof localStorage !== 'undefined',
+            hasIndexedDB: typeof indexedDB !== 'undefined',
+            hasBroadcastChannel: typeof BroadcastChannel !== 'undefined',
+        };
+        var result = __assign(__assign({}, env), overrides);
+        cachedEnv = result;
+        return result;
+    }
+
+    // 内存存储实现
+    // 无持久化，用于 AsyncStorage / localStorage 均不可用时的 fallback
+    var MemoryStorage = /** @class */ (function () {
+        function MemoryStorage() {
+            this.store = new Map();
+        }
+        MemoryStorage.prototype.load = function (poolKey) {
+            return __awaiter(this, void 0, void 0, function () {
+                var _a;
+                return __generator(this, function (_b) {
+                    return [2 /*return*/, (_a = this.store.get(poolKey)) !== null && _a !== void 0 ? _a : []];
+                });
+            });
+        };
+        MemoryStorage.prototype.save = function (poolKey, entries) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    this.store.set(poolKey, entries);
+                    return [2 /*return*/];
+                });
+            });
+        };
+        MemoryStorage.prototype.clear = function (prefix) {
+            return __awaiter(this, void 0, void 0, function () {
+                var _i, _a, key;
+                return __generator(this, function (_b) {
+                    for (_i = 0, _a = this.store.keys(); _i < _a.length; _i++) {
+                        key = _a[_i];
+                        if (key.startsWith(prefix)) {
+                            this.store.delete(key);
+                        }
+                    }
+                    return [2 /*return*/];
+                });
+            });
+        };
+        return MemoryStorage;
+    }());
+
+    // 浏览器 localStorage 存储适配器
+    // 从 translation-client.ts 提取的现有逻辑，行为不变
+    var LocalStorageAdapter = /** @class */ (function () {
+        function LocalStorageAdapter(prefix) {
+            if (prefix === void 0) { prefix = 'laker_translation_'; }
+            this.prefix = prefix;
+        }
+        LocalStorageAdapter.prototype.key = function (poolKey) {
+            return "".concat(this.prefix).concat(poolKey);
+        };
+        LocalStorageAdapter.prototype.load = function (poolKey) {
+            return __awaiter(this, void 0, void 0, function () {
+                var raw, data;
+                return __generator(this, function (_a) {
+                    try {
+                        raw = localStorage === null || localStorage === void 0 ? void 0 : localStorage.getItem(this.key(poolKey));
+                        if (!raw)
+                            return [2 /*return*/, []];
+                        data = JSON.parse(raw);
+                        return [2 /*return*/, data.map(function (d) {
+                                var _a;
+                                return (__assign({ text: d.text, translation: d.translation, timestamp: (_a = d.timestamp) !== null && _a !== void 0 ? _a : 0 }, (d.expiresAt !== undefined ? { expiresAt: d.expiresAt } : {})));
+                            })];
+                    }
+                    catch (e) {
+                        console.warn('[LocalStorageAdapter] load failed:', e);
+                        return [2 /*return*/, []];
+                    }
+                    return [2 /*return*/];
+                });
+            });
+        };
+        LocalStorageAdapter.prototype.save = function (poolKey, entries) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    try {
+                        localStorage === null || localStorage === void 0 ? void 0 : localStorage.setItem(this.key(poolKey), JSON.stringify(entries.map(function (_a) {
+                            var text = _a.text, translation = _a.translation, timestamp = _a.timestamp, expiresAt = _a.expiresAt;
+                            return (__assign({ text: text, translation: translation, timestamp: timestamp }, (expiresAt !== undefined ? { expiresAt: expiresAt } : {})));
+                        })));
+                    }
+                    catch (e) {
+                        console.warn('[LocalStorageAdapter] save failed:', e);
+                    }
+                    return [2 /*return*/];
+                });
+            });
+        };
+        LocalStorageAdapter.prototype.clear = function (prefix) {
+            return __awaiter(this, void 0, void 0, function () {
+                var keysToRemove, i, k;
+                var _a;
+                return __generator(this, function (_b) {
+                    try {
+                        keysToRemove = [];
+                        for (i = 0; i < ((_a = localStorage === null || localStorage === void 0 ? void 0 : localStorage.length) !== null && _a !== void 0 ? _a : 0); i++) {
+                            k = localStorage === null || localStorage === void 0 ? void 0 : localStorage.key(i);
+                            if (k && k.startsWith("".concat(this.prefix).concat(prefix))) {
+                                keysToRemove.push(k);
+                            }
+                        }
+                        keysToRemove.forEach(function (k) { return localStorage === null || localStorage === void 0 ? void 0 : localStorage.removeItem(k); });
+                    }
+                    catch (e) {
+                        console.warn('[LocalStorageAdapter] clear failed:', e);
+                    }
+                    return [2 /*return*/];
+                });
+            });
+        };
+        return LocalStorageAdapter;
+    }());
+
+    // React Native / Expo AsyncStorage 存储适配器
+    // 惰性接收 AsyncStorage 实例，避免构建时强依赖
+    var AsyncStorageAdapter = /** @class */ (function () {
+        function AsyncStorageAdapter(storage, prefix) {
+            if (prefix === void 0) { prefix = 'laker_translation_'; }
+            this.storage = storage;
+            this.prefix = prefix;
+        }
+        AsyncStorageAdapter.prototype.key = function (poolKey) {
+            return "".concat(this.prefix).concat(poolKey);
+        };
+        AsyncStorageAdapter.prototype.load = function (poolKey) {
+            return __awaiter(this, void 0, void 0, function () {
+                var raw, data, e_1;
+                return __generator(this, function (_a) {
+                    switch (_a.label) {
+                        case 0:
+                            _a.trys.push([0, 2, , 3]);
+                            return [4 /*yield*/, this.storage.getItem(this.key(poolKey))];
+                        case 1:
+                            raw = _a.sent();
+                            if (!raw)
+                                return [2 /*return*/, []];
+                            data = JSON.parse(raw);
+                            return [2 /*return*/, data.map(function (d) {
+                                    var _a;
+                                    return (__assign({ text: d.text, translation: d.translation, timestamp: (_a = d.timestamp) !== null && _a !== void 0 ? _a : 0 }, (d.expiresAt !== undefined ? { expiresAt: d.expiresAt } : {})));
+                                })];
+                        case 2:
+                            e_1 = _a.sent();
+                            console.warn('[AsyncStorageAdapter] load failed:', e_1);
+                            return [2 /*return*/, []];
+                        case 3: return [2 /*return*/];
+                    }
+                });
+            });
+        };
+        AsyncStorageAdapter.prototype.save = function (poolKey, entries) {
+            return __awaiter(this, void 0, void 0, function () {
+                var e_2;
+                return __generator(this, function (_a) {
+                    switch (_a.label) {
+                        case 0:
+                            _a.trys.push([0, 2, , 3]);
+                            return [4 /*yield*/, this.storage.setItem(this.key(poolKey), JSON.stringify(entries.map(function (_a) {
+                                    var text = _a.text, translation = _a.translation, timestamp = _a.timestamp, expiresAt = _a.expiresAt;
+                                    return (__assign({ text: text, translation: translation, timestamp: timestamp }, (expiresAt !== undefined ? { expiresAt: expiresAt } : {})));
+                                })))];
+                        case 1:
+                            _a.sent();
+                            return [3 /*break*/, 3];
+                        case 2:
+                            e_2 = _a.sent();
+                            console.warn('[AsyncStorageAdapter] save failed:', e_2);
+                            return [3 /*break*/, 3];
+                        case 3: return [2 /*return*/];
+                    }
+                });
+            });
+        };
+        /**
+         * 清除所有缓存（传入空 prefix 表示全量清除）
+         * 注意：AsyncStorage 无 key 枚举 API，调用方需在 clear 前收集已知 poolKey 列表
+         */
+        AsyncStorageAdapter.prototype.clear = function (prefix) {
+            return __awaiter(this, void 0, void 0, function () {
+                return __generator(this, function (_a) {
+                    console.warn("[AsyncStorageAdapter] clear('".concat(prefix, "') is a no-op; ") +
+                        'use explicit poolKey removal via TranslationPool API');
+                    return [2 /*return*/];
+                });
+            });
+        };
+        return AsyncStorageAdapter;
+    }());
+
+    // Expo SecureStore token 持久化适配器
+    // 惰性接收 expo-secure-store 实例，避免构建时强依赖
+    var ExpoSecureStoreToken = /** @class */ (function () {
+        function ExpoSecureStoreToken(store, key) {
+            if (key === void 0) { key = 'laker_translation_token'; }
+            this.store = store;
+            this.key = key;
+        }
+        /**
+         * 加载已持久化的 token；未存储或加载失败时返回 null
+         */
+        ExpoSecureStoreToken.prototype.load = function () {
+            return __awaiter(this, void 0, void 0, function () {
+                var e_1;
+                return __generator(this, function (_a) {
+                    switch (_a.label) {
+                        case 0:
+                            _a.trys.push([0, 2, , 3]);
+                            return [4 /*yield*/, this.store.getItemAsync(this.key)];
+                        case 1: return [2 /*return*/, _a.sent()];
+                        case 2:
+                            e_1 = _a.sent();
+                            console.warn('[ExpoSecureStoreToken] load failed:', e_1);
+                            return [2 /*return*/, null];
+                        case 3: return [2 /*return*/];
+                    }
+                });
+            });
+        };
+        /**
+         * 持久化 token
+         */
+        ExpoSecureStoreToken.prototype.save = function (token) {
+            return __awaiter(this, void 0, void 0, function () {
+                var e_2;
+                return __generator(this, function (_a) {
+                    switch (_a.label) {
+                        case 0:
+                            _a.trys.push([0, 2, , 3]);
+                            return [4 /*yield*/, this.store.setItemAsync(this.key, token)];
+                        case 1:
+                            _a.sent();
+                            return [3 /*break*/, 3];
+                        case 2:
+                            e_2 = _a.sent();
+                            console.warn('[ExpoSecureStoreToken] save failed:', e_2);
+                            return [3 /*break*/, 3];
+                        case 3: return [2 /*return*/];
+                    }
+                });
+            });
+        };
+        /**
+         * 清除持久化的 token
+         */
+        ExpoSecureStoreToken.prototype.clear = function () {
+            return __awaiter(this, void 0, void 0, function () {
+                var e_3;
+                return __generator(this, function (_a) {
+                    switch (_a.label) {
+                        case 0:
+                            _a.trys.push([0, 2, , 3]);
+                            return [4 /*yield*/, this.store.deleteItemAsync(this.key)];
+                        case 1:
+                            _a.sent();
+                            return [3 /*break*/, 3];
+                        case 2:
+                            e_3 = _a.sent();
+                            console.warn('[ExpoSecureStoreToken] clear failed:', e_3);
+                            return [3 /*break*/, 3];
+                        case 3: return [2 /*return*/];
+                    }
+                });
+            });
+        };
+        return ExpoSecureStoreToken;
+    }());
+
+    // 惰性加载可选模块工具
+    // 用于 Expo SecureStore / AsyncStorage 等 optional 依赖
+    // 缺失时返回 null 并 warn 一次，调用方降级为内存实现
+    var warnedModules = new Set();
+    /**
+     * 惰性加载可选模块；模块不可用时返回 null 并 warn 一次
+     * @param moduleName 模块名（如 '@react-native-async-storage/async-storage'）
+     * @param label 用于 warn 日志的简短标签
+     * @returns 模块实例；不可用时 null
+     */
+    function tryLazyRequire(moduleName, label) {
+        var tag = label !== null && label !== void 0 ? label : moduleName;
+        try {
+            if (typeof require === 'function') {
+                return require(moduleName);
+            }
+            throw new Error("require is not available in ESM context for '".concat(moduleName, "'"));
+        }
+        catch (e) {
+            if (!warnedModules.has(tag)) {
+                warnedModules.add(tag);
+                console.warn("[SDK] \u53EF\u9009\u6A21\u5757 '".concat(tag, "' \u4E0D\u53EF\u7528\uFF0C\u964D\u7EA7\u4E3A\u5185\u5B58\u5B58\u50A8\u3002") +
+                    " \u5B89\u88C5\u65B9\u5F0F\uFF1Anpx expo install ".concat(moduleName));
+            }
+            return null;
+        }
+    }
+
     var createConnectTransport;
     // Detect environment:
     // - Browser (window exists) → use connect-web
@@ -6457,11 +6783,11 @@ var LakerTranslation = (function (exports) {
         return result;
     }
     // Version from package.json
-    var version = '1.6.150';
+    var version = '1.7.0';
     var TranslationPool = /** @class */ (function () {
         function TranslationPool(client, senseId, options) {
             var _this = this;
-            var _a, _b, _c, _d, _e, _f, _g, _h, _j;
+            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
             this.pools = new Map();
             this.currentFingerprint = null;
             this.currentToLang = null;
@@ -6489,11 +6815,13 @@ var LakerTranslation = (function (exports) {
             // Set up crossTabOptions with defaults
             this.crossTabOptions = __assign(__assign({}, defaultCrossTabOptions), options === null || options === void 0 ? void 0 : options.crossTab);
             // Set up backgroundUpdateOptions with defaults
+            // 优先级：显式 backgroundUpdateEnabled > options.backgroundUpdate.enabled > 默认 false
+            var backgroundUpdateEnabled = (_c = (_a = options === null || options === void 0 ? void 0 : options.backgroundUpdateEnabled) !== null && _a !== void 0 ? _a : (_b = options === null || options === void 0 ? void 0 : options.backgroundUpdate) === null || _b === void 0 ? void 0 : _b.enabled) !== null && _c !== void 0 ? _c : false;
             this.backgroundUpdateOptions = {
-                enabled: (_b = (_a = options === null || options === void 0 ? void 0 : options.backgroundUpdate) === null || _a === void 0 ? void 0 : _a.enabled) !== null && _b !== void 0 ? _b : false,
-                intervalMs: (_d = (_c = options === null || options === void 0 ? void 0 : options.backgroundUpdate) === null || _c === void 0 ? void 0 : _c.intervalMs) !== null && _d !== void 0 ? _d : 5 * 60 * 1000,
-                batchSize: (_f = (_e = options === null || options === void 0 ? void 0 : options.backgroundUpdate) === null || _e === void 0 ? void 0 : _e.batchSize) !== null && _f !== void 0 ? _f : 50,
-                staleThresholdMs: (_h = (_g = options === null || options === void 0 ? void 0 : options.backgroundUpdate) === null || _g === void 0 ? void 0 : _g.staleThresholdMs) !== null && _h !== void 0 ? _h : 24 * 60 * 60 * 1000,
+                enabled: backgroundUpdateEnabled,
+                intervalMs: (_e = (_d = options === null || options === void 0 ? void 0 : options.backgroundUpdate) === null || _d === void 0 ? void 0 : _d.intervalMs) !== null && _e !== void 0 ? _e : 5 * 60 * 1000,
+                batchSize: (_g = (_f = options === null || options === void 0 ? void 0 : options.backgroundUpdate) === null || _f === void 0 ? void 0 : _f.batchSize) !== null && _g !== void 0 ? _g : 50,
+                staleThresholdMs: (_j = (_h = options === null || options === void 0 ? void 0 : options.backgroundUpdate) === null || _h === void 0 ? void 0 : _h.staleThresholdMs) !== null && _j !== void 0 ? _j : 24 * 60 * 60 * 1000,
             };
             // Store full options including defaults for API access
             this.options = __assign(__assign({}, options), { senseId: senseId, crossTab: this.crossTabOptions, backgroundUpdate: this.backgroundUpdateOptions });
@@ -6503,7 +6831,7 @@ var LakerTranslation = (function (exports) {
             }
             // Initialize IndexedDB for browser cache storage (replaces localStorage for large datasets)
             // Only use IndexedDB in browser environment when explicitly enabled or when localStorage is unavailable
-            var useIndexedDBOption = (_j = options === null || options === void 0 ? void 0 : options.useIndexedDB) !== null && _j !== void 0 ? _j : false;
+            var useIndexedDBOption = (_k = options === null || options === void 0 ? void 0 : options.useIndexedDB) !== null && _k !== void 0 ? _k : false;
             var isBrowserWithIDB = typeof indexedDB !== 'undefined';
             if (useIndexedDBOption && isBrowserWithIDB) {
                 this.useIndexedDB = true;
@@ -8003,11 +8331,29 @@ var LakerTranslation = (function (exports) {
     var TranslationClient = /** @class */ (function () {
         function TranslationClient(options) {
             var _this = this;
+            var _a;
             this.persistentStream = null;
             this.persistentStreamWriter = null;
             this.persistentStreamReader = null;
             this.persistentStreamConnected = false;
+            // 可选：Expo SecureStore token 持久化（仅 platform='expo' 时启用）
+            this.secureStoreToken = null;
             this.options = options;
+            this.runtimeEnv = detectEnvironment();
+            // 选择持久存储后端
+            this.persistentStorage = this.selectPersistentStorage(options);
+            // 初始化 Expo SecureStore（仅 Expo 平台）
+            if (options.platform === 'expo' && ((_a = options.native) === null || _a === void 0 ? void 0 : _a.useSecureStore) !== false) {
+                var secureStoreModule = tryLazyRequire('expo-secure-store', 'SecureStore');
+                if (secureStoreModule) {
+                    this.secureStoreToken = new ExpoSecureStoreToken(secureStoreModule);
+                }
+            }
+            // 持久流在移动端默认禁用（后台挂起后长连接无意义）
+            this.persistentStreamDisabled =
+                options.disablePersistentStream === true ||
+                    this.runtimeEnv.isReactNative ||
+                    options.platform === 'expo';
             // If baseUrl is not provided, use the default production endpoint
             // The baseUrl should include the API path prefix for Connect RPC
             // New route structure: /api/v1/rpc/cr/<service>/<method>
@@ -8174,8 +8520,44 @@ var LakerTranslation = (function (exports) {
                 backgroundUpdate: options.backgroundUpdate,
                 persistentStorage: options.persistentStorage,
                 defaultFromLang: this.defaultFromLang,
+                // 移动端默认禁用 backgroundUpdate（后台挂起后定时器冻结）
+                backgroundUpdateEnabled: this.shouldEnableBackgroundUpdate(options),
             });
         }
+        /**
+         * 根据运行时环境和配置选择持久存储后端
+         * - 移动端（Expo/RN）：AsyncStorage（惰性加载），缺失时降级 MemoryStorage
+         * - 浏览器：LocalStorage（保持现有行为）
+         * - Node.js / 其他：MemoryStorage
+         */
+        TranslationClient.prototype.selectPersistentStorage = function (options) {
+            var _a, _b;
+            var nativeOpts = options.native;
+            if (options.platform === 'expo' || (this.runtimeEnv.isReactNative && !this.runtimeEnv.hasLocalStorage)) {
+                if ((nativeOpts === null || nativeOpts === void 0 ? void 0 : nativeOpts.useAsyncStorage) !== false) {
+                    var asyncStorage = tryLazyRequire('@react-native-async-storage/async-storage', 'AsyncStorage');
+                    if (asyncStorage) {
+                        return new AsyncStorageAdapter(asyncStorage);
+                    }
+                }
+                return new MemoryStorage();
+            }
+            if (this.runtimeEnv.hasLocalStorage) {
+                return new LocalStorageAdapter((_b = (_a = options.crossTab) === null || _a === void 0 ? void 0 : _a.storageKeyPrefix) !== null && _b !== void 0 ? _b : 'laker_translation_');
+            }
+            return new MemoryStorage();
+        };
+        /**
+         * 判断是否启用后台更新定时器
+         * 移动端默认禁用（后台挂起后定时器冻结，重新进入前台后手动 preload 刷新）
+         */
+        TranslationClient.prototype.shouldEnableBackgroundUpdate = function (options) {
+            var _a, _b, _c;
+            if (this.runtimeEnv.isReactNative || options.platform === 'expo') {
+                return ((_a = options.backgroundUpdate) === null || _a === void 0 ? void 0 : _a.enabled) === true; // 移动端默认 false
+            }
+            return (_c = (_b = options.backgroundUpdate) === null || _b === void 0 ? void 0 : _b.enabled) !== null && _c !== void 0 ? _c : false;
+        };
         /**
          * Simple one-shot translation - automatically handles caching, initialization, and queuing
          * Auto-detects fingerprint and language changes, automatically loads new translation pool
@@ -8496,6 +8878,11 @@ var LakerTranslation = (function (exports) {
                 var req;
                 var _this = this;
                 return __generator(this, function (_a) {
+                    // 移动端或显式禁用时，跳过持久流（后台挂起后长连接无意义）
+                    if (this.persistentStreamDisabled) {
+                        console.log('[TranslationClient] 持久流已禁用（移动端环境），使用按需流式请求');
+                        return [2 /*return*/];
+                    }
                     if (this.persistentStreamConnected) {
                         console.log('[TranslationClient] Persistent stream already connected');
                         return [2 /*return*/];
