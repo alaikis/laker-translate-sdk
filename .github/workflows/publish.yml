@@ -33,4 +33,4 @@ jobs:
 
       - name: Publish
         working-directory: js/connect
-        run: npm publish --provenance
+        run: npm publish
