@@ -34,6 +34,19 @@ jobs:
         working-directory: js/connect
         run: npm run build
 
+      - name: Show npm config
+        working-directory: js/connect
+        run: |
+          echo "npm version: $(npm --version)"
+          echo "registry: $(npm config get registry)"
+          echo "node version: $(node --version)"
+
       - name: Publish
         working-directory: js/connect
         run: npm publish
+
+      - name: Verify publish
+        working-directory: js/connect
+        run: |
+          echo "=== verify published version ==="
+          npm view @alaikis/translation-sdk version --registry=https://registry.npmjs.org || echo "npm view failed"
