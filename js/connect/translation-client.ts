@@ -191,7 +191,7 @@ export function mergeTemplate(template: string, vars: Record<string, string | nu
 }
 
 // Version from package.json
-export const version = '1.7.0';
+export const version = '1.7.1';
 
 type CrossTabOptions = {
   enabled: boolean;

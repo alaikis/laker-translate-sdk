@@ -1567,7 +1567,7 @@ function mergeTemplate(template, vars) {
     return result;
 }
 // Version from package.json
-var version = '1.7.0';
+var version = '1.7.1';
 var TranslationPool = /** @class */ (function () {
     function TranslationPool(client, senseId, options) {
         var _this = this;
