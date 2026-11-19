@@ -23,6 +23,9 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
+      - name: Upgrade npm to 11.x (required for trusted publishing)
+        run: npm install -g npm@11
+
       - name: Install dependencies
         working-directory: js/connect
         run: npm ci
